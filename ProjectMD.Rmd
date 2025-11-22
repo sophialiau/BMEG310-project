@@ -7,6 +7,9 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(survival)
+library(survminer)
+
 ```
 
 \section{1. Key Findings}
@@ -28,7 +31,7 @@ mutations <- read.delim("data_mutations.txt", header = TRUE,
 ```
 ## 2.1. Data Preprocessing
 
-## a. Standardize Patient IDs
+**a. Standardize Patient IDs**
 
 In clinical dataset, patient IDs have the form of "TCGA-2V-A95S" while mutation dataset contains tumour sample barcode which has the form of "TCGA-2V-A95S-01." As a result, we will standardized patient IDs such that it is consistent by taking only the first 12 characters. We will add a column with the standardized patient IDs to each of the dataset. Then take only patients that are present in both datasets. 
 
@@ -41,7 +44,7 @@ clinical <- clinical[clinical$Patient_ID %in% common_ids, ]
 mutations <- mutations[mutations$Patient_ID %in% common_ids, ]
 ```
 
-## b. Filter for Non-Synonymous Mutations
+**b. Filter for Non-Synonymous Mutations**
 
 We will use Variant_Classification columns to see the type of mutations presented in the dataset:
 ```{r}
@@ -59,7 +62,7 @@ nonsynonymous <- c(
 mut_filtered <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
 ```
 
-## c. Gene x Patient Matrix
+**c. Gene x Patient Matrix**
 
 The Gene x Patient matrix turns raw muation calls into a form that allows clustering and other downstream data analysis methods. The matrix's row will be genes and its column is patient. If a mutation is present in a patient, then that cell will contain the value of one. Note that we are building a matrix for non-synonymous genes only.
 
@@ -86,9 +89,153 @@ We will compute TMB which is the total number of mutated genes per patient. This
 tmb <- colSums(mut_matrix)
 ```
 
+**e. Transform Clinical Variables**
+
+Many clinical variables are in string form when we want them to be in numeric form. We will transform these variables to help with downstream data analysis. We will create a function to remove labels like 1:Progressed and keep only number, then convert into numeric form.
+
+```{r}
+parse_status <- function(x) {
+    as.numeric(sub(":.*", "", x))
+}
+
+# Convert time strings ("63.72") to numeric
+parse_time <- function(x) {
+    as.numeric(trimws(x))
+}
+
+# Age
+clinical$Diagnosis.Age <- parse_time(clinical$Diagnosis.Age)
+# Survival Times
+clinical$Overall_Time  <- parse_time(clinical$Overall.Survival..Months.)
+clinical$DSS_Time      <- parse_time(clinical$Months.of.disease.specific.survival)
+clinical$DFS_Time      <- parse_time(clinical$Disease.Free..Months.)
+clinical$PFS_Time      <- parse_time(clinical$Progress.Free.Survival..Months.)
+# Survival Status
+clinical$Overall_Status <- parse_status(clinical$Overall.Survival.Status)
+clinical$DSS_Status     <- parse_status(clinical$Disease.specific.Survival.status)
+clinical$DFS_Status     <- parse_status(clinical$Disease.Free.Status)
+clinical$PFS_Status     <- parse_status(clinical$Progression.Free.Status)
+
+```
+
+
 ## 2.2. Clinical Exploration
 
-##
+**a. Age Distribution**
+
+We will use Diagnosis.Age to contruct a histogram on the distribution of patient age. 
+```{r}
+age_data <- clinical[!is.na(clinical$Diagnosis.Age), ]
+par(cex = 0.67)
+hist(age_data$Diagnosis.Age,
+     main = "Age Distribution",
+     xlab = "Age",
+     col = "seagreen", border = "black")
+```
+
+**b. Sex Distribution**
+We will contruct a barplot on sex distribution. 
+```{r}
+table(clinical$Sex)
+par(cex = 0.67)
+barplot(table(clinical$Sex),
+        main = "Sex Distribution",
+        col = c("pink", "lightblue"))
+```
+**c. Race Distribution**
+```{r}
+library(ggplot2)
+
+ggplot(subset(clinical, Race.Category != "" & !is.na(Race.Category)),
+       aes(x = Race.Category)) +
+  geom_bar(fill = "seagreen") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7.3),
+    text = element_text(size = 7.3))
+```
+
+**d. Stage Distribution**
+```{r}
+par(cex = 0.67)
+barplot(table(clinical$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code),
+        main = "Stage Distribution", las = 2, col = "seagreen")
+
+```
+
+**e. Survival Summaries**
+```{r}
+summary(clinical$Overall_Time)
+summary(clinical$DFS_Time)
+summary(clinical$PFS_Time)
+summary(clinical$DSS_Time)
+```
+
+## 2.3. Mutation-Based Clusters
+
+```{r}
+dist_mat <- dist(t(mut_matrix), method = "euclidean")
+hc <- hclust(dist_mat, method = "ward.D2")
+plot(hc, labels = FALSE, main = "Patient Clustering Based on Mutation Matrix")
+clusters <- cutree(hc, k = 2)
+clinical$Mutation_Cluster <- clusters[clinical$Patient_ID]
+```
+
+```{r}
+os_data <- clinical[, c("Overall_Time", "Overall_Status", "Mutation_Cluster")]
+os_data <- na.omit(os_data)
+
+fit_os <- survfit(
+  Surv(os_data$Overall_Time, os_data$Overall_Status) ~ Mutation_Cluster,
+  data = os_data
+)
+
+ggsurvplot(fit_os, data = os_data,
+           pval = TRUE, risk.table = TRUE,
+           title = "Overall Survival by Mutation Cluster",
+           legend.title = "Cluster")
+```
+
+```{r}
+dss_data <- clinical[, c("DSS_Time", "DSS_Status", "Mutation_Cluster")]
+dss_data <- na.omit(dss_data)
+
+fit_dss <- survfit(
+  Surv(DSS_Time, DSS_Status) ~ Mutation_Cluster,
+  data = dss_data
+)
+
+ggsurvplot(fit_dss, data = dss_data,
+           pval = TRUE, risk.table = TRUE,
+           title = "DSS by Mutation Cluster")
+```
+
+```{r}
+dfs_data <- clinical[, c("DFS_Time", "DFS_Status", "Mutation_Cluster")]
+dfs_data <- na.omit(dfs_data)
+
+fit_dfs <- survfit(
+  Surv(DFS_Time, DFS_Status) ~ Mutation_Cluster,
+  data = dfs_data
+)
+
+ggsurvplot(fit_dfs, data = dfs_data,
+           pval = TRUE, risk.table = TRUE,
+           title = "DFS by Mutation Cluster")
+```
+
+
+```{r}
+pfs_data <- clinical[, c("PFS_Time", "PFS_Status", "Mutation_Cluster")]
+pfs_data <- na.omit(pfs_data)
+
+fit_pfs <- survfit(
+  Surv(PFS_Time, PFS_Status) ~ Mutation_Cluster,
+  data = pfs_data
+)
+
+ggsurvplot(fit_pfs, data = pfs_data,
+           pval = TRUE, risk.table = TRUE,
+           title = "PFS by Mutation Cluster")
+```
 
 ## 3. Results
 
