@@ -1,0 +1,112 @@
+---
+title: "\\textbf{Project Report 1: Mutation Analysis}"
+author: "Group 15 - Liver Carcinoma"
+date: "2025-11-21"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\section{1. Key Findings}
+
+Should summarize the key findings of the analysis in up to 5 bullet points.
+
+\section{2. Overall Analysis Workflow}
+
+Give a description of your analysis workflow including the algorithms (approaches) you have tried (or will try) and the patient variables you have investigated. This is the most important part of this report. You are required to include a flowchart of all the analysis.
+
+From The Cancer Genome Atlas (TCGA), we imported the following datasets:
+
+```{r}
+clinical <- read.delim("data_clinical_patient.txt", header = TRUE,
+                      sep = "\t", stringsAsFactors = FALSE)
+mutations <- read.delim("data_mutations.txt", header = TRUE,
+                      sep = "\t", stringsAsFactors = FALSE)
+                       
+```
+## 2.1. Data Preprocessing
+
+## a. Standardize Patient IDs
+
+In clinical dataset, patient IDs have the form of "TCGA-2V-A95S" while mutation dataset contains tumour sample barcode which has the form of "TCGA-2V-A95S-01." As a result, we will standardized patient IDs such that it is consistent by taking only the first 12 characters. We will add a column with the standardized patient IDs to each of the dataset. Then take only patients that are present in both datasets. 
+
+```{r}
+clinical$Patient_ID <- clinical$X.Patient.Identifier
+mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
+
+common_ids <- intersect(clinical$Patient_ID, mutations$Patient_ID)
+clinical <- clinical[clinical$Patient_ID %in% common_ids, ]
+mutations <- mutations[mutations$Patient_ID %in% common_ids, ]
+```
+
+## b. Filter for Non-Synonymous Mutations
+
+We will use Variant_Classification columns to see the type of mutations presented in the dataset:
+```{r}
+unique(mutations$Variant_Classification)
+```
+We will keep the non-synonymous mutations which are those that mutate the coding regions.
+```{r}
+nonsynonymous <- c(
+  "Missense_Mutation", "Nonsense_Mutation",
+  "Frame_Shift_Del", "Frame_Shift_Ins",
+  "In_Frame_Del", "In_Frame_Ins",
+  "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
+  "Translation_Start_Site"
+)
+mut_filtered <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
+```
+
+## c. Gene x Patient Matrix
+
+The Gene x Patient matrix turns raw muation calls into a form that allows clustering and other downstream data analysis methods. The matrix's row will be genes and its column is patient. If a mutation is present in a patient, then that cell will contain the value of one. Note that we are building a matrix for non-synonymous genes only.
+
+```{r}
+genes <- unique(mut_filtered$Hugo_Symbol)
+patients <- unique(mut_filtered$Patient_ID)
+
+mut_matrix <- matrix(0, nrow = length(genes), ncol = length(patients))
+rownames(mut_matrix) <- genes
+colnames(mut_matrix) <- patients
+
+for (i in seq_len(nrow(mut_filtered))) {
+    g <- mut_filtered$Hugo_Symbol[i]
+    p <- mut_filtered$Patient_ID[i]
+    mut_matrix[g, p] <- 1
+}
+```
+
+**d. Tumor Mutation Burden (TMB)**
+
+We will compute TMB which is the total number of mutated genes per patient. This can give us more insights into survival in later in our analysis as TMB can associate with mutation-driven cancer, immune response or prognosis. 
+
+```{r}
+tmb <- colSums(mut_matrix)
+```
+
+## 2.2. Clinical Exploration
+
+##
+
+## 3. Results
+
+Should provide an itemized list of investigations and analysis you have performed, along with the findings of such an analysis. Every result or claim needs to be backed up by R markdown code as well as accompanying outputs and figures/flowcharts. Organize every investigation into a sub-section in the results section. You would need to include at least 5 investigations in the results section. The quality (rather than quantity) of the analysis will be key in grading.
+
+## 4. Challenges
+
+Use this section to address any difficulties you are encountering, or expect you will encounter as you make progress with the project. This may include limitations of a current approach or a lack of meaningful results. Please explain why you believe this problem is occurring, and highlight any limitations in your data you have found.
+
+
+
+
+
+
+
+
+
+
+
+
+
