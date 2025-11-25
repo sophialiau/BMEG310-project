@@ -9,24 +9,88 @@ output: html_document
 ```{r setup, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
+# --- Setup ---
+knitr::opts_chunk$set(echo = TRUE)
 library(dplyr)
+library(knitr)
+library(readr)
+library(tibble)
 library(ggplot2)
-library(tidyr)
 
 # --- Load Data ---
-clinical <- read.delim(
+clinical <- read_tsv(
   "data_clinical_patient.txt",
-  header = TRUE,
-  sep = "\t",
-  stringsAsFactors = FALSE
+  comment = "#",
+  show_col_types = FALSE
 )
 
-mutations <- read.delim(
+mutation <- read.delim(
   "data_mutations.txt",
-  header = TRUE,
   sep = "\t",
-  stringsAsFactors = FALSE
+  header = TRUE
 )
+
+
+
+# --- Helper Function ---
+normalize_tcga <- function(x) {
+  x <- as.character(x)
+  x <- gsub("\\.", "-", x)
+  substr(x, 1, 12)
+}
+
+# --- Unique IDs ---
+clin_ids <- unique(normalize_tcga(clinical$PATIENT_ID))
+mut_ids <- unique(normalize_tcga(mutation$Tumor_Sample_Barcode))
+rna_cols <- setdiff(colnames(rnaseq), c("Hugo_Symbol", "Entrez_Gene_Id"))
+rna_ids <- unique(normalize_tcga(rna_cols))
+
+# --- Count Table ---
+counts_tbl <- tibble(
+  Dataset = c("Clinical", "Mutation", "RNAseq"),
+  `Unique Patients` = c(length(clin_ids), length(mut_ids), length(rna_ids))
+)
+
+kable(
+  counts_tbl,
+  align = c("l", "c"),
+  caption = "Unique Patient Counts per Dataset"
+)
+
+# --- Patients in all three ---
+common_ids <- Reduce(intersect, list(clin_ids, mut_ids, rna_ids))
+
+kable(
+  tibble(`Patients with ALL Clinical + Mutation + RNAseq` = length(common_ids)),
+  align = "c",
+  caption = "Patients with All Three Data Types"
+)
+
+# ----------------------------
+# Filter clinical to common patients
+# ----------------------------
+
+clinical <- clinical %>%
+  mutate(PATIENT_ID = normalize_tcga(PATIENT_ID)) %>%
+  filter(PATIENT_ID %in% common_ids)
+
+# ----------------------------
+# Non-synonymous mutation filtering
+# ----------------------------
+
+nonsyn_types <- c(
+  "Missense_Mutation", "Nonsense_Mutation", "Nonstop_Mutation",
+  "Frame_Shift_Del", "Frame_Shift_Ins",
+  "In_Frame_Del", "In_Frame_Ins",
+  "Splice_Site", "Translation_Start_Site"
+)
+
+mutation <- mutation %>%
+  mutate(PATIENT_ID = normalize_tcga(Tumor_Sample_Barcode)) %>%
+  filter(
+    Variant_Classification %in% nonsyn_types,
+    PATIENT_ID %in% common_ids
+  )
 
 
 ```
@@ -34,19 +98,10 @@ mutations <- read.delim(
 
 
 ```{r}
-
-
-# Adjust this if your column name is slightly different
-clinical$Patient_ID  <- clinical$X.Patient.Identifier
-mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
-
-# Keep only patients present in both clinical and mutation data
-common_ids <- intersect(clinical$Patient_ID, mutations$Patient_ID)
-
-clinical  <- clinical[clinical$Patient_ID %in% common_ids, ]
-mutations <- mutations[mutations$Patient_ID %in% common_ids, ]
-
+colnames(clinical)
 ```
+
+
 
 
 ```{r}
@@ -95,7 +150,7 @@ for (i in seq_len(nrow(mut_filtered))) {
 TMB <- colSums(mut_matrix)
 
 tmb_df <- data.frame(
-  Patient_ID = names(TMB),
+  PATIENT_ID = names(TMB),
   TMB = as.numeric(TMB),
   row.names = NULL
 )
@@ -108,11 +163,7 @@ tmb_df <- data.frame(
 
 ```{r}
 # --- Find and collapse cancer stage into 1–4 ---
-
-# 1) Detect stage column automatically
-stage_candidates <- grep("stage|Stage|STAGE|pathologic|Pathologic",
-                         names(clinical),
-                         value = TRUE)
+stage_col <- "AJCC_PATHOLOGIC_TUMOR_STAGE"
 
 stage_col <- stage_candidates[1]     # use first match
 stage_col                             # prints the chosen column
@@ -145,7 +196,7 @@ clinical_stage <- clinical %>%
     )
   ) %>%
   filter(!is.na(Stage_num)) %>%
-  select(Patient_ID, Stage_raw, Stage_num, Stage_grp)
+  select(PATIENT_ID, Stage_raw, Stage_num, Stage_grp)
 
 clinical_stage
 
@@ -157,7 +208,7 @@ clinical_stage
 
 
 tmb_stage <- tmb_df %>%
-  inner_join(clinical_stage, by = "Patient_ID")
+  inner_join(clinical_stage, by = "PATIENT_ID")
 
 ggplot(tmb_stage, aes(x = Stage_grp, y = TMB)) +
   geom_boxplot(fill = "lightblue", alpha = 0.5) +
@@ -206,7 +257,7 @@ clinical_stage <- clinical_stage %>%
 ```{r}
 # Merge TMB with early/late stage
 tmb_stage_binary <- tmb_df %>%
-  inner_join(clinical_stage, by = "Patient_ID") %>%
+  inner_join(clinical_stage, by = "PATIENT_ID") %>%
   filter(!is.na(Stage_binary))
 
 # Plot
@@ -234,8 +285,8 @@ top_genes
 # Build patient × gene table
 gene_df <- t(mut_matrix[top_genes, ]) %>%
   as.data.frame() %>%
-  mutate(Patient_ID = rownames(.)) %>%
-  inner_join(clinical_stage, by = "Patient_ID")
+  mutate(PATIENT_ID = rownames(.)) %>%
+  inner_join(clinical_stage, by = "PATIENT_ID")
 
 # Calculate mutation proportion per stage
 stage_gene_freq <- gene_df %>%
@@ -280,8 +331,8 @@ top_genes
 # Build patient × gene table
 gene_df <- t(mut_matrix[top_genes, ]) %>%
   as.data.frame() %>%
-  mutate(Patient_ID = rownames(.)) %>%
-  inner_join(clinical_stage, by = "Patient_ID")
+  mutate(PATIENT_ID = rownames(.)) %>%
+  inner_join(clinical_stage, by = "PATIENT_ID")
 
 # Calculate mutation proportion per stage
 stage_gene_freq <- gene_df %>%
@@ -354,9 +405,23 @@ Additionally, we can now see that DNAH6 appears only in the early-stage group. T
 
 
 ```{r}
+colnames(clinical)
 
 ```
+
   
+
+```{r}
+unique_counts <- sapply(clinical, function(x) length(unique(na.omit(x))))
+unique_counts
+
+```
+
+```{r}
+clinical$PATH_T_STAGE
+
+```
+
 
 
 
