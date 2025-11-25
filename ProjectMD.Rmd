@@ -59,7 +59,8 @@ nonsynonymous <- c(
   "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
   "Translation_Start_Site"
 )
-mut_filtered <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
+mut_filt <- mutations$Variant_Classification %in% nonsynonymous
+
 ```
 
 **c. Gene x Patient Matrix**
@@ -87,6 +88,9 @@ We will compute TMB which is the total number of mutated genes per patient. This
 
 ```{r}
 tmb <- colSums(mut_matrix)
+hist(tmb, breaks = 30, col = "seagreen", border = "black",
+     main = "TMB Distribution",
+     xlab = "Tumor Mutation Burden (# mutated genes)")
 ```
 
 **e. Transform Clinical Variables**
@@ -169,8 +173,15 @@ summary(clinical$PFS_Time)
 summary(clinical$DSS_Time)
 ```
 
-## 2.3. Mutation-Based Clusters
+## 2.3. Patients' Mutational Profile
 
+
+
+
+
+## 2.4. Mutation-Based Clusters
+
+**2.4.1. Clusters on Top 10 Mutated Genes**
 ```{r}
 # Compute mutation frequency per gene
 gene_counts <- rowSums(mut_matrix)
@@ -191,13 +202,55 @@ dist_mat <- dist(t(mut_top), method = "binary")
 hc <- hclust(dist_mat, method = "ward.D2")
 
 plot(hc, labels = FALSE,
-     main = "Clustering Based on Top 5 Mutated Genes")
+     main = "Clustering Based on Top 10 Mutated Genes")
 
 clusters <- cutree(hc, k = 2)
 clinical2$Mutation_Cluster <- clusters
 
 
 ```
+
+**2.4.1. Clusters on TBM**
+
+```{r}
+
+# Identify outliers using IQR method
+Q1 <- quantile(tmb, 0.25)
+Q3 <- quantile(tmb, 0.75)
+IQR_val <- Q3 - Q1
+
+upper_cut <- Q3 + 3 * IQR_val
+
+# Filter out patients with extreme TMB
+tmb_filtered <- tmb[tmb <= upper_cut]
+
+# Print how many removed
+sum(tmb > upper_cut)
+
+# Convert to matrix
+tmb_mat_filtered <- as.matrix(tmb_filtered)
+
+# Distance based on TMB only
+dist_tmb <- dist(tmb_mat_filtered, method = "euclidean")
+
+hc_tmb <- hclust(dist_tmb, method = "ward.D2")
+
+plot(hc_tmb, labels = FALSE,
+     main = "Hierarchical Clustering Based on TMB (Outliers Removed)")
+
+
+tmb_clusters <- cutree(hc_tmb, k = 2)
+
+# Align clinical data
+clinical_tmb <- clinical[match(names(tmb_clusters), clinical$Patient_ID), ]
+clinical_tmb$TMB_Cluster <- tmb_clusters
+
+
+```
+
+
+
+## 2.5. Survival Analysis
 
 ```{r}
 os_data <- clinical2[, c("Overall_Time", "Overall_Status", "Mutation_Cluster")]
@@ -256,6 +309,15 @@ fit_pfs <- survfit(
 ggsurvplot(fit_pfs, data = pfs_data,
            pval = TRUE, risk.table = TRUE,
            title = "PFS by Mutation Cluster")
+```
+
+```{r}
+t.test(clinical2$Diagnosis.Age ~ clinical2$Mutation_Cluster)
+chisq.test(table(clinical2$Sex, clinical2$Mutation_Cluster))
+chisq.test(table(clinical2$Race.Category, clinical2$Mutation_Cluster))
+chisq.test(table(clinical2$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code,
+clinical2$Mutation_Cluster))
+t.test(tmb ~ clusters)
 ```
 
 ## 3. Results
