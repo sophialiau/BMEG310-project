@@ -1,0 +1,363 @@
+---
+title: "Sarah"
+author: "Sarah Dumont"
+date: "2025-11-25"
+output: html_document
+---
+
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# --- Load Data ---
+clinical <- read.delim(
+  "data_clinical_patient.txt",
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE
+)
+
+mutations <- read.delim(
+  "data_mutations.txt",
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE
+)
+
+
+```
+
+
+
+```{r}
+
+
+# Adjust this if your column name is slightly different
+clinical$Patient_ID  <- clinical$X.Patient.Identifier
+mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
+
+# Keep only patients present in both clinical and mutation data
+common_ids <- intersect(clinical$Patient_ID, mutations$Patient_ID)
+
+clinical  <- clinical[clinical$Patient_ID %in% common_ids, ]
+mutations <- mutations[mutations$Patient_ID %in% common_ids, ]
+
+```
+
+
+```{r}
+
+
+
+### 🔹 Chunk 3 — Filter for *Non-Synonymous* Mutations (your specified list)
+
+nonsynonymous <- c(
+  "Missense_Mutation", "Nonsense_Mutation",
+  "Frame_Shift_Del", "Frame_Shift_Ins",
+  "In_Frame_Del", "In_Frame_Ins",
+  "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
+  "Translation_Start_Site"
+)
+
+mut_filtered <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
+
+```
+
+
+
+```{r}
+
+
+### 🔹 Chunk 4 — Build Gene × Patient Matrix + TMB
+
+genes    <- sort(unique(mut_filtered$Hugo_Symbol))
+patients <- sort(unique(mut_filtered$Patient_ID))
+
+# Matrix: rows = genes, cols = patients, entries = 0/1 for "has non-syn mutation"
+mut_matrix <- matrix(
+  0L,
+  nrow = length(genes),
+  ncol = length(patients),
+  dimnames = list(genes, patients)
+)
+
+for (i in seq_len(nrow(mut_filtered))) {
+  g <- mut_filtered$Hugo_Symbol[i]
+  p <- mut_filtered$Patient_ID[i]
+  mut_matrix[g, p] <- 1L
+}
+
+# Tumor Mutation Burden (TMB) = number of mutated genes per patient
+TMB <- colSums(mut_matrix)
+
+tmb_df <- data.frame(
+  Patient_ID = names(TMB),
+  TMB = as.numeric(TMB),
+  row.names = NULL
+)
+
+```
+
+
+
+
+
+```{r}
+# --- Find and collapse cancer stage into 1–4 ---
+
+# 1) Detect stage column automatically
+stage_candidates <- grep("stage|Stage|STAGE|pathologic|Pathologic",
+                         names(clinical),
+                         value = TRUE)
+
+stage_col <- stage_candidates[1]     # use first match
+stage_col                             # prints the chosen column
+
+# 2) Function to clean stage strings
+clean_stage_to_14 <- function(x) {
+  x <- toupper(as.character(x))
+  x <- gsub("^STAGE\\s*", "", x)   # remove "Stage "
+  x <- gsub("[A]+$", "", x)      # remove letters A/B/C/etc.
+  x <- trimws(x)
+
+  dplyr::case_when(
+    x %in% c("I", "1")   ~ 1L,
+    x %in% c("II", "2")  ~ 2L,
+    x %in% c("III", "3") ~ 3L,
+    x %in% c("IV", "4")  ~ 4L,
+    TRUE ~ NA_integer_
+  )
+}
+
+# 3) Apply stage collapse
+clinical_stage <- clinical %>%
+  mutate(
+    Stage_raw = .data[[stage_col]],
+    Stage_num = clean_stage_to_14(Stage_raw),
+    Stage_grp = factor(
+      Stage_num,
+      levels = 1:4,
+      labels = paste("Stage", 1:4)
+    )
+  ) %>%
+  filter(!is.na(Stage_num)) %>%
+  select(Patient_ID, Stage_raw, Stage_num, Stage_grp)
+
+clinical_stage
+
+
+```
+
+
+```{r}
+
+
+tmb_stage <- tmb_df %>%
+  inner_join(clinical_stage, by = "Patient_ID")
+
+ggplot(tmb_stage, aes(x = Stage_grp, y = TMB)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Tumor Mutation Burden by Collapsed Stage (I–IV)",
+    x = "Stage (Grouped)",
+    y = "TMB (Non-synonymous Mutations)"
+  )
+
+```
+
+
+```{r}
+# Count patients per collapsed stage
+table(clinical_stage$Stage_grp)
+
+# Or a nicer data frame
+stage_counts <- clinical_stage %>%
+  count(Stage_grp)
+
+stage_counts
+
+```
+Troubles: cannot do with by simply splitting stages because stage for only has 4 patients so we will combine - look at stage 1, stage 2 and late stages 3 + 4
+
+```{r}
+# Collapse Stage into Stage 1, Stage 2, Late Stages (3+4)
+clinical_stage <- clinical_stage %>%
+  mutate(
+    Stage_binary = case_when(
+      Stage_num == 1 ~ "Stage 1",
+      Stage_num == 2 ~ "Stage 2",
+      Stage_num %in% c(3, 4) ~ "Late Stages",
+      TRUE ~ NA_character_
+    ),
+    Stage_binary = factor(
+      Stage_binary,
+      levels = c("Stage 1", "Stage 2", "Late Stages")
+    )
+  )
+
+```
+
+```{r}
+# Merge TMB with early/late stage
+tmb_stage_binary <- tmb_df %>%
+  inner_join(clinical_stage, by = "Patient_ID") %>%
+  filter(!is.na(Stage_binary))
+
+# Plot
+ggplot(tmb_stage_binary, aes(x = Stage_binary, y = TMB)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.6) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Tumor Mutation Burden: Early vs Late Stage",
+    x = "Stage Group",
+    y = "TMB (Non-synonymous Mutations)"
+  )
+
+
+```
+TMB alone is not a good staging biomarker
+These box plots do not have enough variation a model will not be able to distiguish these catigoeies   
+
+
+```{r}
+gene_freq <- rowSums(mut_matrix)
+top_genes <- names(sort(gene_freq, decreasing = TRUE))[1:20]
+top_genes
+
+# Build patient × gene table
+gene_df <- t(mut_matrix[top_genes, ]) %>%
+  as.data.frame() %>%
+  mutate(Patient_ID = rownames(.)) %>%
+  inner_join(clinical_stage, by = "Patient_ID")
+
+# Calculate mutation proportion per stage
+stage_gene_freq <- gene_df %>%
+  group_by(Stage_binary) %>%
+  summarise(across(top_genes, mean))
+
+stage_gene_freq
+write.table(stage_gene_freq, row.names = FALSE, sep = ",")
+
+
+
+```
+Now we can see there is diffrences between these but if there enough to create a modle that is going to have high accuray where high is defiend as above 90 percent. Short answer no. There is not enough spread in the data. Lets try something else lets look just at early and late stages
+
+
+
+
+```{r}
+
+# Collapse Stage into Stage 1, Stage 2, Late Stages (3+4)
+clinical_stage <- clinical_stage %>%
+  mutate(
+    Stage_binary_2 = case_when(
+      Stage_num %in% c(1, 2) ~ "Early Stages",
+      Stage_num %in% c(3, 4) ~ "Late Stages",
+      TRUE ~ NA_character_
+    ),
+    Stage_binary_2 = factor(
+      Stage_binary_2,
+      levels = c("Early Stages", "Late Stages")
+    )
+  )
+
+```
+
+
+```{r}
+gene_freq <- rowSums(mut_matrix)
+top_genes <- names(sort(gene_freq, decreasing = TRUE))[1:50]
+top_genes
+
+# Build patient × gene table
+gene_df <- t(mut_matrix[top_genes, ]) %>%
+  as.data.frame() %>%
+  mutate(Patient_ID = rownames(.)) %>%
+  inner_join(clinical_stage, by = "Patient_ID")
+
+# Calculate mutation proportion per stage
+stage_gene_freq <- gene_df %>%
+  group_by(Stage_binary_2) %>%
+  summarise(across(top_genes, mean))
+
+stage_gene_freq
+#write.table(stage_gene_freq, row.names = FALSE, sep = ",")
+```
+
+
+```{r}
+
+# Get just the gene columns (everything except Stage_binary_2)
+genes <- setdiff(names(stage_gene_freq), "Stage_binary_2")
+
+# Extract rows for Early and Late
+early_row <- stage_gene_freq %>%
+  filter(Stage_binary_2 == "Early Stages") %>%
+  select(all_of(genes))
+
+late_row <- stage_gene_freq %>%
+  filter(Stage_binary_2 == "Late Stages") %>%
+  select(all_of(genes))
+
+# Compute Late - Early for each gene
+diff_vec <- as.numeric(late_row[1, ] - early_row[1, ])
+
+# Build a table: gene, difference, absolute difference
+gene_diff_tbl <- tibble(
+  Gene     = genes,
+  Diff     = diff_vec,           # Late - Early (signed)
+  Abs_Diff = abs(diff_vec)       # absolute difference
+) %>%
+  arrange(desc(Abs_Diff))         # sort by largest absolute difference
+
+gene_diff_tbl <- gene_diff_tbl[1:10, ]
+
+# If you want an easy copy/paste version:
+write.table(gene_diff_tbl, row.names = FALSE, sep = ",")
+
+```
+```{r}
+# Plot mutation proportion for Top 10 different genes
+top10_genes <- gene_diff_tbl$Gene[1:4]
+
+bar_df <- stage_gene_freq %>%
+  select(Stage_binary_2, all_of(top10_genes)) %>%
+  pivot_longer(cols = all_of(top10_genes),
+               names_to = "Gene",
+               values_to = "Proportion")
+
+ggplot(bar_df, aes(x = Gene, y = Proportion, fill = Stage_binary_2)) +
+  geom_col(position = "dodge") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Mutation Proportions of Top 4 Differentiating Genes",
+    y = "Proportion Mutated"
+  )
+
+```
+
+
+This shows that after performing some preliminary re-organization of the data, we now have a structured set of mutation features that can more effectively separate cancer stages into early and late groups. This improves the usefulness of the dataset and should increase the accuracy of any future predictive models by ensuring they are trained on meaningful, relevant information — garbage in, garbage out.
+
+Additionally, we can now see that DNAH6 appears only in the early-stage group. This suggests that DNAH6 may be a particularly valuable feature for helping the model distinguish between early and late cancer stages.
+
+
+
+
+```{r}
+
+```
+  
+
+
+
+
