@@ -419,10 +419,329 @@ unique_counts
 
 ```{r}
 clinical$PATH_T_STAGE
+clinical$PATH_N_STAGE
+clinical$PATH_M_STAGE
+
+
+```
+```{r}
+library(dplyr)
+library(stringr)
+
+# ---- CLEAN T STAGE ----
+clean_T <- function(x) {
+  x <- toupper(as.character(x))
+  x <- gsub("[A-Z]+$", "", x)     # remove A/B/C, etc.
+  x <- gsub("^T", "", x)          # remove leading T
+  x <- trimws(x)
+
+  case_when(
+    x %in% c("0","1","2","3","4") ~ paste0("T", x),
+    TRUE ~ NA_character_
+  )
+}
+
+clinical$T_clean <- clean_T(clinical$PATH_T_STAGE)
+
+T_counts <- table(clinical$T_clean, useNA = "ifany")
+T_counts
+
+
+# ---- CLEAN N STAGE ----
+clean_N <- function(x) {
+  x <- toupper(as.character(x))
+  x <- gsub("^N", "", x)          # remove leading N
+  x <- trimws(x)
+
+  case_when(
+    x %in% c("0","1", "X") ~ paste0("N", x),
+    TRUE ~ NA_character_
+  )
+}
+
+clinical$N_clean <- clean_N(clinical$PATH_N_STAGE)
+
+N_counts <- table(clinical$N_clean, useNA = "ifany")
+N_counts
+
+
+# ---- CLEAN M STAGE ----
+clean_M <- function(x) {
+  x <- toupper(as.character(x))
+  x <- gsub("^M", "", x)          # remove leading M
+  x <- trimws(x)
+
+  case_when(
+    x %in% c("0","1", "X") ~ paste0("M", x),
+    TRUE ~ NA_character_
+  )
+}
+
+clinical$M_clean <- clean_M(clinical$PATH_M_STAGE)
+
+M_counts <- table(clinical$M_clean, useNA = "ifany")
+M_counts
+
+
+# ---- FILTER OUT NA T/N/M IF NEEDED ----
+clinical_TNM <- clinical %>%
+  filter(!is.na(T_clean), !is.na(N_clean), !is.na(M_clean))
+
+```
+so from this it is clear that T0 and T1 need to be combined as well as T3 and T4
+and N1 and M1 need to be ommited and cannot be correctly prodicited with this data set. Upon further reserach anything with the compenet X so NX and MX means that this data was not collected meaning There so not enough data to do analysis on for these two categories 
+
+
+```{r}
+
+clinical <- clinical %>%
+  mutate(
+    T_clean = clean_T(PATH_T_STAGE),
+  )
+
+
+# --- APPLY YOUR DECISIONS BASED ON COUNTS ---
+# - Combine T0 + T1
+# - Combine T3 + T4
+# - Drop N1 (too few)
+# - Drop M1 (too few)
+
+
+clinical_TNM_collapsed <- clinical %>%
+  mutate(
+    T_group = case_when(
+      T_clean %in% c("T0", "T1")      ~ "T0-1",
+      T_clean == "T2"                 ~ "T2",
+      T_clean %in% c("T3", "T4")      ~ "T3-4",
+      TRUE                            ~ NA_character_
+    )
+  ) %>%
+  # drop unusable N and M categories
+  filter(
+    !is.na(T_group),
+    N_clean != "N1",
+    M_clean != "M1",
+
+  )
+
+# Check final distributions
+table(clinical_TNM_collapsed$T_group)
+table(clinical_TNM_collapsed$N_clean)
+table(clinical_TNM_collapsed$M_clean)
+  
+```
+
+```{r}
+library(dplyr)
+
+## 1. Create collapsed T groups: T0-1, T2, T3-4 ----
+
+clean_T <- function(x) {
+  x <- toupper(as.character(x))
+  x <- gsub("[A-Z]+$", "", x)   # drop suffix A/B/C
+  x <- gsub("^T", "", x)        # drop leading T
+  x <- trimws(x)
+
+  dplyr::case_when(
+    x %in% c("0", "1") ~ "T0-1",
+    x == "2"           ~ "T2",
+    x %in% c("3", "4") ~ "T3-4",
+    TRUE               ~ NA_character_
+  )
+}
+
+clinical <- clinical %>%
+  mutate(T_group = clean_T(PATH_T_STAGE))
+
+## 2. Keep only patients with valid T_group and present in mut_matrix ----
+
+clinical_t <- clinical %>%
+  filter(!is.na(T_group))
+
+common_ids <- intersect(colnames(mut_matrix), clinical_t$PATIENT_ID)
+
+mut_t <- mut_matrix[, common_ids, drop = FALSE]
+
+clinical_t <- clinical_t %>%
+  filter(PATIENT_ID %in% common_ids) %>%
+  arrange(match(PATIENT_ID, colnames(mut_t)))
+
+## 3. Remove genes with zero variance ----
+
+gene_var <- apply(mut_t, 1, var)
+mut_t_var <- mut_t[gene_var > 0, , drop = FALSE]
+
+## 4. PCA on mutation data only (rows = patients, cols = genes) ----
+
+X <- t(mut_t_var)  # patients × genes
+
+pca_res <- prcomp(X, center = TRUE, scale. = TRUE)
+
+## 5. Build PCA data frame with *all* PCs + T_group ----
+##    (number of PCs = nrow(X) - 1)
+
+all_pcs <- ncol(pca_res$x)
+
+pca_df <- data.frame(
+  pca_res$x[, 1:all_pcs, drop = FALSE],
+  T_group = clinical_t$T_group
+)
+
+
 
 ```
 
 
 
+```{r}
 
+# Basic 2D PCA plot: PC1 vs PC2 colored by T_group
+ggplot(pca_df, aes(x = PC1, y = PC2, color = T_group)) +
+  geom_point(alpha = 0.8, size = 2) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "PCA of Mutation Data (PC1 vs PC2)",
+    x = "PC1",
+    y = "PC2"
+  )
+
+# PC2 vs PC3 (sometimes separation is clearer on other components)
+ggplot(pca_df, aes(x = PC2, y = PC3, color = T_group)) +
+  geom_point(alpha = 0.8, size = 2) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "PCA of Mutation Data (PC2 vs PC3)",
+    x = "PC2",
+    y = "PC3"
+  )
+
+# Optional: facet by T_group to see each cluster separately on PC1/PC2
+ggplot(pca_df, aes(x = PC1, y = PC2)) +
+  geom_point(alpha = 0.8, size = 2) +
+  facet_wrap(~ T_group) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "PCA (PC1 vs PC2) Faceted by T Group",
+    x = "PC1",
+    y = "PC2"
+  )
+
+```
+
+```{r}
+# Install (if needed)
+install.packages("umap")
+
+library(umap)
+library(ggplot2)
+library(dplyr)
+
+# --- UMAP input matrix ---
+# X = patients × genes (same as PCA input)
+X <- t(mut_t_var)   # rows = patients, cols = genes
+
+# --- Run UMAP ---
+set.seed(123)
+umap_res <- umap(X)
+
+# Build UMAP DF
+umap_df <- data.frame(
+  UMAP1 = umap_res$layout[,1],
+  UMAP2 = umap_res$layout[,2],
+  T_group = clinical_t$T_group
+)
+
+# --- Plot UMAP ---
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = T_group)) +
+  geom_point(alpha = 0.8, size = 2) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "UMAP of Mutation Data (Colored by T Group)",
+    x = "UMAP1",
+    y = "UMAP2"
+  )
+
+```
+
+```{r}
+library(nnet)
+
+# Use PC1–PC10 as predictors
+model_data <- pca_df
+model_data$T_group <- factor(model_data$T_group)
+
+set.seed(123)
+logit_model <- multinom(T_group ~ ., data = model_data)
+
+summary(logit_model)
+
+# Predictions
+pred <- predict(logit_model, model_data)
+
+# Accuracy
+mean(pred == model_data$T_group)
+
+```
+```{r}
+install.packages("randomForest")
+library(randomForest)
+
+
+```
+
+```{r}
+# Variance explained by each PC
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+
+# Cumulative variance
+cum_var <- cumsum(var_explained)
+
+# Find number of PCs needed for 90% variance
+which(cum_var >= 0.20)[1]
+
+```
+
+```{r}
+
+
+k <- 20  # <- change this to use 5, 10, 20, ... PCs
+
+model_data <- pca_df %>%
+  select(all_of(paste0("PC", 1:k)), T_group)
+model_data$T_group <- factor(model_data$T_group)
+
+set.seed(123)
+
+n <- nrow(model_data)
+idx <- sample(seq_len(n), size = floor(0.7 * n))   # 70% training
+
+train <- model_data[idx, ]
+test  <- model_data[-idx, ]
+
+# ------------------------
+# Random Forest Model
+# ------------------------
+rf_model <- randomForest(
+  T_group ~ ., 
+  data = train,
+  ntree = 500,       # number of trees
+  mtry = 3,          # PCs to try at each split (tuneable)
+  importance = TRUE
+)
+
+# ------------------------
+# Predictions + Accuracy
+# ------------------------
+rf_pred <- predict(rf_model, test)
+
+rf_accuracy <- mean(rf_pred == test$T_group)
+rf_accuracy
+
+
+```
+```{r}
+#library(caret)
+rf_confusion <- table(Predicted = rf_pred, Actual = test$T_group)
+rf_confusion
+```
 
