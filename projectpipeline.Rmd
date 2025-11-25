@@ -1,5 +1,113 @@
 ---
-title: "projectpipeline"
-output: html_document
+title: "\\textbf{Project Report 1: Mutation Analysis}"
+author: "Group 15 - Liver Carcinoma"
+date: "2025-11-21"
+output: pdf_document
 ---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(survival)
+library(survminer)
+
+```
+
+\section{1. Key Findings}
+
+Should summarize the key findings of the analysis in up to 5 bullet points.
+
+\section{2. Overall Analysis Workflow}
+
+Give a description of your analysis workflow including the algorithms (approaches) you have tried (or will try) and the patient variables you have investigated. This is the most important part of this report. You are required to include a flowchart of all the analysis.
+
+From The Cancer Genome Atlas (TCGA), we imported the following datasets:
+
+```{r}
+clinical <- read.delim("data_clinical_patient.txt", header = TRUE,
+                      sep = "\t", stringsAsFactors = FALSE)
+mutations <- read.delim("data_mutations.txt", header = TRUE,
+                      sep = "\t", stringsAsFactors = FALSE)
+                       
+```
+## 2.1. Data Preprocessing
+
+**a. Standardize Patient IDs**
+
+In clinical dataset, patient IDs have the form of "TCGA-2V-A95S" while mutation dataset contains tumour sample barcode which has the form of "TCGA-2V-A95S-01." As a result, we will standardized patient IDs such that it is consistent by taking only the first 12 characters. We will add a column with the standardized patient IDs to each of the dataset. Then take only patients that are present in both datasets. 
+
+```{r}
+clinical$Patient_ID <- clinical$X.Patient.Identifier
+mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
+
+common_ids <- intersect(clinical$Patient_ID, mutations$Patient_ID)
+clinical <- clinical[clinical$Patient_ID %in% common_ids, ]
+mutations <- mutations[mutations$Patient_ID %in% common_ids, ]
+```
+
+**b. Filter for Non-Synonymous Mutations**
+
+We will use Variant_Classification columns to see the type of mutations presented in the dataset:
+```{r}
+unique(mutations$Variant_Classification)
+```
+We will keep the non-synonymous mutations which are those that mutate the coding regions.
+```{r}
+nonsynonymous <- c(
+  "Missense_Mutation", "Nonsense_Mutation",
+  "Frame_Shift_Del", "Frame_Shift_Ins",
+  "In_Frame_Del", "In_Frame_Ins",
+  "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
+  "Translation_Start_Site"
+)
+mut_filt <- mutations$Variant_Classification %in% nonsynonymous
+
+```
+
+**c. Gene x Patient Matrix**
+
+The Gene x Patient matrix turns raw muation calls into a form that allows clustering and other downstream data analysis methods. The matrix's row will be genes and its column is patient. If a mutation is present in a patient, then that cell will contain the value of one. Note that we are building a matrix for non-synonymous genes only.
+
+```{r}
+genes <- unique(mut_filtered$Hugo_Symbol)
+patients <- unique(mut_filtered$Patient_ID)
+
+mut_matrix <- matrix(0, nrow = length(genes), ncol = length(patients))
+rownames(mut_matrix) <- genes
+colnames(mut_matrix) <- patients
+
+for (i in seq_len(nrow(mut_filtered))) {
+    g <- mut_filtered$Hugo_Symbol[i]
+    p <- mut_filtered$Patient_ID[i]
+    mut_matrix[g, p] <- 1
+}
+```
+
+**d. Transform Clinical Variables**
+
+Many clinical variables are in string form when we want them to be in numeric form. We will transform these variables to help with downstream data analysis. We will create a function to remove labels like 1:Progressed and keep only number, then convert into numeric form.
+
+```{r}
+parse_status <- function(x) {
+    as.numeric(sub(":.*", "", x))
+}
+
+# Convert time strings ("63.72") to numeric
+parse_time <- function(x) {
+    as.numeric(trimws(x))
+}
+
+# Age
+clinical$Diagnosis.Age <- parse_time(clinical$Diagnosis.Age)
+# Survival Times
+clinical$Overall_Time  <- parse_time(clinical$Overall.Survival..Months.)
+clinical$DSS_Time      <- parse_time(clinical$Months.of.disease.specific.survival)
+clinical$DFS_Time      <- parse_time(clinical$Disease.Free..Months.)
+clinical$PFS_Time      <- parse_time(clinical$Progress.Free.Survival..Months.)
+# Survival Status
+clinical$Overall_Status <- parse_status(clinical$Overall.Survival.Status)
+clinical$DSS_Status     <- parse_status(clinical$Disease.specific.Survival.status)
+clinical$DFS_Status     <- parse_status(clinical$Disease.Free.Status)
+clinical$PFS_Status     <- parse_status(clinical$Progression.Free.Status)
+
+```
 

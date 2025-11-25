@@ -204,7 +204,7 @@ hc <- hclust(dist_mat, method = "ward.D2")
 plot(hc, labels = FALSE,
      main = "Clustering Based on Top 10 Mutated Genes")
 
-clusters <- cutree(hc, k = 2)
+clusters <- cutree(hc, k = 4)
 clinical2$Mutation_Cluster <- clusters
 
 
