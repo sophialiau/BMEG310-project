@@ -9,10 +9,7 @@ output: html_document
 ```{r setup, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-# --- Setup ---
-knitr::opts_chunk$set(echo = TRUE)
 library(dplyr)
-library(knitr)
 library(readr)
 library(tibble)
 library(ggplot2)
@@ -27,112 +24,49 @@ clinical <- read_tsv(
 mutation <- read.delim(
   "data_mutations.txt",
   sep = "\t",
-  header = TRUE
+  header = TRUE,
+  stringsAsFactors = FALSE
 )
 
-
-
-# --- Helper Function ---
+# --- Helper: normalize TCGA IDs to first 12 chars with dashes ---
 normalize_tcga <- function(x) {
   x <- as.character(x)
   x <- gsub("\\.", "-", x)
   substr(x, 1, 12)
 }
 
-# --- Unique IDs ---
+# --- Get patient IDs in clinical and mutation data ---
 clin_ids <- unique(normalize_tcga(clinical$PATIENT_ID))
-mut_ids <- unique(normalize_tcga(mutation$Tumor_Sample_Barcode))
-rna_cols <- setdiff(colnames(rnaseq), c("Hugo_Symbol", "Entrez_Gene_Id"))
-rna_ids <- unique(normalize_tcga(rna_cols))
+mut_ids  <- unique(normalize_tcga(mutation$Tumor_Sample_Barcode))
 
-# --- Count Table ---
-counts_tbl <- tibble(
-  Dataset = c("Clinical", "Mutation", "RNAseq"),
-  `Unique Patients` = c(length(clin_ids), length(mut_ids), length(rna_ids))
-)
+# Only keep patients that are in BOTH clinical and mutation datasets
+common_ids <- intersect(clin_ids, mut_ids)
 
-kable(
-  counts_tbl,
-  align = c("l", "c"),
-  caption = "Unique Patient Counts per Dataset"
-)
-
-# --- Patients in all three ---
-common_ids <- Reduce(intersect, list(clin_ids, mut_ids, rna_ids))
-
-kable(
-  tibble(`Patients with ALL Clinical + Mutation + RNAseq` = length(common_ids)),
-  align = "c",
-  caption = "Patients with All Three Data Types"
-)
-
-# ----------------------------
-# Filter clinical to common patients
-# ----------------------------
-
+# --- Filter clinical to common patients (not actually used below, but kept for completeness) ---
 clinical <- clinical %>%
   mutate(PATIENT_ID = normalize_tcga(PATIENT_ID)) %>%
   filter(PATIENT_ID %in% common_ids)
 
-# ----------------------------
-# Non-synonymous mutation filtering
-# ----------------------------
-
-nonsyn_types <- c(
-  "Missense_Mutation", "Nonsense_Mutation", "Nonstop_Mutation",
+# --- Filter to NON-SYNONYMOUS mutations (single clean list) ---
+nonsynonymous <- c(
+  "Missense_Mutation", "Nonsense_Mutation",
+  "Nonstop_Mutation",
   "Frame_Shift_Del", "Frame_Shift_Ins",
   "In_Frame_Del", "In_Frame_Ins",
   "Splice_Site", "Translation_Start_Site"
 )
 
-mutation <- mutation %>%
+mutation_ns <- mutation %>%
   mutate(PATIENT_ID = normalize_tcga(Tumor_Sample_Barcode)) %>%
   filter(
-    Variant_Classification %in% nonsyn_types,
+    Variant_Classification %in% nonsynonymous,
     PATIENT_ID %in% common_ids
   )
 
+# --- Build Gene × Patient mutation matrix (0/1) ---
+genes    <- sort(unique(mutation_ns$Hugo_Symbol))
+patients <- sort(unique(mutation_ns$PATIENT_ID))
 
-```
-
-
-
-```{r}
-colnames(clinical)
-```
-
-
-
-
-```{r}
-
-
-
-### 🔹 Chunk 3 — Filter for *Non-Synonymous* Mutations (your specified list)
-
-nonsynonymous <- c(
-  "Missense_Mutation", "Nonsense_Mutation",
-  "Frame_Shift_Del", "Frame_Shift_Ins",
-  "In_Frame_Del", "In_Frame_Ins",
-  "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
-  "Translation_Start_Site"
-)
-
-mut_filtered <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
-
-```
-
-
-
-```{r}
-
-
-### 🔹 Chunk 4 — Build Gene × Patient Matrix + TMB
-
-genes    <- sort(unique(mut_filtered$Hugo_Symbol))
-patients <- sort(unique(mut_filtered$Patient_ID))
-
-# Matrix: rows = genes, cols = patients, entries = 0/1 for "has non-syn mutation"
 mut_matrix <- matrix(
   0L,
   nrow = length(genes),
@@ -140,26 +74,196 @@ mut_matrix <- matrix(
   dimnames = list(genes, patients)
 )
 
-for (i in seq_len(nrow(mut_filtered))) {
-  g <- mut_filtered$Hugo_Symbol[i]
-  p <- mut_filtered$Patient_ID[i]
+for (i in seq_len(nrow(mutation_ns))) {
+  g <- mutation_ns$Hugo_Symbol[i]
+  p <- mutation_ns$PATIENT_ID[i]
   mut_matrix[g, p] <- 1L
 }
 
-# Tumor Mutation Burden (TMB) = number of mutated genes per patient
-TMB <- colSums(mut_matrix)
+# --- Gene mutation frequencies across the cohort ---
+gene_freq <- rowSums(mut_matrix)  # how many patients mutated per gene
 
-tmb_df <- data.frame(
-  PATIENT_ID = names(TMB),
-  TMB = as.numeric(TMB),
-  row.names = NULL
+top_n <- 20  # change this if you want more/less
+top_genes <- sort(gene_freq, decreasing = TRUE)[1:top_n]
+
+top_genes_df <- tibble(
+  Gene = names(top_genes),
+  Mutated_Patients = as.integer(top_genes)
 )
+
+
 
 ```
 
 
+```{r}
+# --- Bar plot of most frequently mutated genes ---
+ggplot(top_genes_df,
+       aes(x = reorder(Gene, Mutated_Patients),
+           y = Mutated_Patients)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = paste("Top", top_n, "Most Frequently Mutated Genes"),
+    x = "Gene",
+    y = "Number of Patients with a Non-synonymous Mutation"
+  )
+```
+
+```{r}
+# --- Histogram of Mutation Counts per Gene ---
+
+# mutation count for each gene
+gene_mut_counts <- rowSums(mut_matrix)
+
+# put into a data frame
+gene_freq_df <- data.frame(
+  Gene = names(gene_mut_counts),
+  Count = as.numeric(gene_mut_counts)
+)
+
+# histogram
+ggplot(gene_freq_df, aes(x = Count)) +
+  geom_histogram(
+    bins = 50,
+    fill = "steelblue",
+    color = "black",
+    alpha = 0.7
+  ) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Distribution of Mutation Frequencies Across Genes",
+    x = "Number of Patients Mutated (per gene)",
+    y = "Number of Genes"
+  )
+
+```
+
+```{r}
+# Number of mutated genes per patient
+patient_mut_counts <- colSums(mut_matrix)
+
+# Mean TMB (mean mutated genes)
+mean_mutated_genes <- mean(patient_mut_counts)
+
+mean_mutated_genes
+
+```
+```{r}
+# Gene variance across patients (binary 0/1)
+gene_variance <- apply(mut_matrix, 1, var)
+
+# Sort descending
+gene_variance_sorted <- sort(gene_variance, decreasing = TRUE)
+
+# Look at the top variance genes
+head(gene_variance_sorted, 20)
+
+```
+
+```{r}
+
+# 1. Gene variance across patients
+gene_variance <- apply(mut_matrix, 1, var)
+
+# 2. Sort by variance (high → low)
+gene_variance_sorted <- sort(gene_variance, decreasing = TRUE)
+
+# 3. Basic variance curve (log scale)
+plot(
+  gene_variance_sorted,
+  type = "l",
+  log = "y",
+  lwd = 2,
+  col = "blue",
+  xlab = "Gene Rank (sorted by variance)",
+  ylab = "Variance (log scale)",
+  main = "Gene Variance Distribution with Elbow"
+)
+
+# 4. Approximate elbow via second derivative on log-variance
+y_log <- log10(gene_variance_sorted + 1e-10)  # avoid log(0)
+d1 <- diff(y_log)
+d2 <- diff(d1)
+
+# We look for the point of **maximum curvature**
+elbow <- which.max(-d2) + 1   # +1 to align with original index
+
+elbow
+
+# 5. Add vertical line at elbow
+abline(v = elbow, col = "red", lwd = 2, lty = 2)
+
+text(
+  x = elbow,
+  y = max(gene_variance_sorted),
+  labels = paste("Elbow =", elbow),
+  pos = 4,
+  col = "red"
+)
+
+# 6. Extract "significant" genes (above elbow)
+significant_genes <- names(gene_variance_sorted)[1:elbow]
+head(significant_genes)
+length(significant_genes)
 
 
+
+```
+
+✔ A small group of genes drive almost all variation
+✔ Most genes in the genome are not mutated in this cancer type
+✔ The “important” high-variance genes are the ones involved in the disease
+
+Top 6 most frequelntly mutated genes "TP53"   "TTN"    "CTNNB1" "MUC16"  "ALB"    "PCLO" 
+
+
+
+```{r}
+# --- PCA to Assess Variance Structure ---
+
+# 1. Transpose mut_matrix → rows = patients, cols = genes
+X <- t(mut_matrix)
+
+# 2. PCA (center & scale recommended for binary mutation data)
+pca_res <- prcomp(X, center = TRUE, scale. = TRUE)
+
+# 3. Variance explained per PC
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+
+# 4. Cumulative variance explained
+cum_var <- cumsum(var_explained)
+
+# 5. Find how many PCs needed for 90% variance
+num_pcs_90 <- which(cum_var >= 0.99)[1]
+
+num_pcs_90
+
+```
+
+I ran PCA here to understand why we don't want to be using PCA! 270 PCAs is alot typically when doing PCA analysis we end up / want to end up with less then 10 PCAs, however here the reason that we have so many is because there is so many genes and some of them only have a couple mutations means that this will have low variance but becasue so many of them have low varianvce PCA needs alot more PCAs to achive 90 percent
+
+
+```{r}
+length(genes)
+```
+```{r}
+gene_variance <- apply(mut_matrix, 1, var)
+sort(gene_variance, decreasing = TRUE)[1:20]
+
+```
+
+Look into 
+
+
+
+
+Question 1: 
+
+
+
+Question 2: can a model be predicted that can accuratly determine the stage of cancer.
 
 ```{r}
 # --- Find and collapse cancer stage into 1–4 ---
@@ -221,6 +325,11 @@ ggplot(tmb_stage, aes(x = Stage_grp, y = TMB)) +
   )
 
 ```
+Look into the TMB to see if maybe total number of mutations could be an indicator of stage of cancer. From this box plot it looks like most are in similar ranges meaning purely quantity of mutated genes is not a good indicator. So further analysis on specifc mutated genes would potenitally be a better indicator of cancer stage be a better indicator
+
+
+TMB alone is not a good staging biomarker
+These box plots do not have enough variation a model will not be able to distiguish these catigoeies   
 
 
 ```{r}
@@ -234,79 +343,16 @@ stage_counts <- clinical_stage %>%
 stage_counts
 
 ```
-Troubles: cannot do with by simply splitting stages because stage for only has 4 patients so we will combine - look at stage 1, stage 2 and late stages 3 + 4
-
-```{r}
-# Collapse Stage into Stage 1, Stage 2, Late Stages (3+4)
-clinical_stage <- clinical_stage %>%
-  mutate(
-    Stage_binary = case_when(
-      Stage_num == 1 ~ "Stage 1",
-      Stage_num == 2 ~ "Stage 2",
-      Stage_num %in% c(3, 4) ~ "Late Stages",
-      TRUE ~ NA_character_
-    ),
-    Stage_binary = factor(
-      Stage_binary,
-      levels = c("Stage 1", "Stage 2", "Late Stages")
-    )
-  )
-
-```
-
-```{r}
-# Merge TMB with early/late stage
-tmb_stage_binary <- tmb_df %>%
-  inner_join(clinical_stage, by = "PATIENT_ID") %>%
-  filter(!is.na(Stage_binary))
-
-# Plot
-ggplot(tmb_stage_binary, aes(x = Stage_binary, y = TMB)) +
-  geom_boxplot(fill = "lightblue", alpha = 0.6) +
-  geom_jitter(width = 0.2, alpha = 0.5) +
-  theme_minimal(base_size = 14) +
-  labs(
-    title = "Tumor Mutation Burden: Early vs Late Stage",
-    x = "Stage Group",
-    y = "TMB (Non-synonymous Mutations)"
-  )
+Troubles: cannot do with by simply splitting stages because stage for only has 4 patients so we will combine into early and late stage cancer instead.
 
 
-```
-TMB alone is not a good staging biomarker
-These box plots do not have enough variation a model will not be able to distiguish these catigoeies   
-
-
-```{r}
-gene_freq <- rowSums(mut_matrix)
-top_genes <- names(sort(gene_freq, decreasing = TRUE))[1:20]
-top_genes
-
-# Build patient × gene table
-gene_df <- t(mut_matrix[top_genes, ]) %>%
-  as.data.frame() %>%
-  mutate(PATIENT_ID = rownames(.)) %>%
-  inner_join(clinical_stage, by = "PATIENT_ID")
-
-# Calculate mutation proportion per stage
-stage_gene_freq <- gene_df %>%
-  group_by(Stage_binary) %>%
-  summarise(across(top_genes, mean))
-
-stage_gene_freq
-write.table(stage_gene_freq, row.names = FALSE, sep = ",")
-
-
-
-```
-Now we can see there is diffrences between these but if there enough to create a modle that is going to have high accuray where high is defiend as above 90 percent. Short answer no. There is not enough spread in the data. Lets try something else lets look just at early and late stages
 
 
 
 
 ```{r}
 
-# Collapse Stage into Stage 1, Stage 2, Late Stages (3+4)
+# Cobine into Early Stage and Late Stage
 clinical_stage <- clinical_stage %>%
   mutate(
     Stage_binary_2 = case_when(
@@ -325,7 +371,7 @@ clinical_stage <- clinical_stage %>%
 
 ```{r}
 gene_freq <- rowSums(mut_matrix)
-top_genes <- names(sort(gene_freq, decreasing = TRUE))[1:50]
+top_genes <- names(sort(gene_freq, decreasing = TRUE))[1:50] # look at top 50 mutated genes
 top_genes
 
 # Build patient × gene table
@@ -375,9 +421,49 @@ gene_diff_tbl <- gene_diff_tbl[1:10, ]
 write.table(gene_diff_tbl, row.names = FALSE, sep = ",")
 
 ```
+
+
+```{r}
+library(dplyr)
+
+# --- Your top-10 most different genes (already sorted by Abs_Diff) ---
+gene_diff_tbl <- tibble::tribble(
+  ~Gene,     ~Diff,         ~Abs_Diff,
+  "FAT3",    0.0718912666,  0.0718912666,
+  "DNAH6",  -0.0647773279,  0.0647773279,
+  "USH2A",   0.0616541353,  0.0616541353,
+  "GPR98",  -0.0604973973,  0.0604973973,
+  "PKHD1L1",-0.0504916136,  0.0504916136,
+  "COL11A1",-0.0464430306,  0.0464430306,
+  "LRP1B",   0.0395026026,  0.0395026026,
+  "BAP1",   -0.0383458647,  0.0383458647,
+  "RYR2",   -0.0378831695,  0.0378831695,
+  "CACNA1E", 0.0373626374,  0.0373626374
+)
+
+# --- Top 50 most mutated genes (from your mutation matrix) ---
+gene_freq <- rowSums(mut_matrix)
+top_50_genes <- names(sort(gene_freq, decreasing = TRUE))[1:100]
+
+# lookup: gene -> rank 1..50 within top-50 list
+top50_rank_lookup <- setNames(seq_along(top_50_genes), top_50_genes)
+
+# --- Add ranks (1–10 by difference, + rank within top-50) ---
+gene_diff_ranked <- gene_diff_tbl %>%
+  mutate(
+    DiffRank = row_number(),                 # 1..10 (already sorted)
+    Rank_in_Top50 = top50_rank_lookup[Gene]  # 1..50 or NA if not in top 50
+  )
+
+gene_diff_ranked
+
+```
+
+
+
 ```{r}
 # Plot mutation proportion for Top 10 different genes
-top10_genes <- gene_diff_tbl$Gene[1:4]
+top10_genes <- gene_diff_tbl$Gene[1:6]
 
 bar_df <- stage_gene_freq %>%
   select(Stage_binary_2, all_of(top10_genes)) %>%
@@ -404,26 +490,7 @@ Additionally, we can now see that DNAH6 appears only in the early-stage group. T
 
 
 
-```{r}
-colnames(clinical)
 
-```
-
-  
-
-```{r}
-unique_counts <- sapply(clinical, function(x) length(unique(na.omit(x))))
-unique_counts
-
-```
-
-```{r}
-clinical$PATH_T_STAGE
-clinical$PATH_N_STAGE
-clinical$PATH_M_STAGE
-
-
-```
 ```{r}
 library(dplyr)
 library(stringr)
@@ -702,8 +769,6 @@ which(cum_var >= 0.20)[1]
 ```
 
 ```{r}
-
-
 k <- 20  # <- change this to use 5, 10, 20, ... PCs
 
 model_data <- pca_df %>%
@@ -725,7 +790,7 @@ rf_model <- randomForest(
   T_group ~ ., 
   data = train,
   ntree = 500,       # number of trees
-  mtry = 3,          # PCs to try at each split (tuneable)
+  mtry = 3,          
   importance = TRUE
 )
 
@@ -744,4 +809,118 @@ rf_accuracy
 rf_confusion <- table(Predicted = rf_pred, Actual = test$T_group)
 rf_confusion
 ```
+remove T2 group 
+
+
+```{r}
+library(dplyr)
+
+## 1. Create collapsed T groups: T0-1, T3-4 -
+
+clean_T <- function(x) {
+  x <- toupper(as.character(x))
+  x <- gsub("[A-Z]+$", "", x)   # drop suffix A/B/C
+  x <- gsub("^T", "", x)        # drop leading T
+  x <- trimws(x)
+
+  dplyr::case_when(
+    x %in% c("0", "1") ~ "T0-1",
+    x %in% c("3", "4") ~ "T3-4",
+    TRUE               ~ NA_character_
+  )
+}
+
+clinical <- clinical %>%
+  mutate(T_group = clean_T(PATH_T_STAGE))
+
+clinical_t <- clinical %>%
+  filter(!is.na(T_group))
+
+common_ids <- intersect(colnames(mut_matrix), clinical_t$PATIENT_ID)
+
+mut_t <- mut_matrix[, common_ids, drop = FALSE]
+
+clinical_t <- clinical_t %>%
+  filter(PATIENT_ID %in% common_ids) %>%
+  arrange(match(PATIENT_ID, colnames(mut_t)))
+
+## 3. Remove genes with zero variance ----
+
+gene_var <- apply(mut_t, 1, var)
+mut_t_var <- mut_t[gene_var > 0, , drop = FALSE]
+
+## 4. PCA on mutation data only (rows = patients, cols = genes) ----
+
+X <- t(mut_t_var)  # patients × genes
+
+pca_res <- prcomp(X, center = TRUE, scale. = TRUE)
+
+## 5. Build PCA data frame with *all* PCs + T_group ----
+##    (number of PCs = nrow(X) - 1)
+
+all_pcs <- ncol(pca_res$x)
+
+pca_df <- data.frame(
+  pca_res$x[, 1:all_pcs, drop = FALSE],
+  T_group = clinical_t$T_group
+)
+```
+
+```{r}
+  
+```
+
+
+```{r}
+# Variance explained by each PC
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+
+# Cumulative variance
+cum_var <- cumsum(var_explained)
+
+# Find number of PCs needed for 90% variance
+which(cum_var >= 0.90)[1]
+```
+
+
+
+
+```{r}
+k <- 200  # <- change this to use 5, 10, 20, ... PCs
+
+model_data <- pca_df %>%
+  select(all_of(paste0("PC", 1:k)), T_group)
+model_data$T_group <- factor(model_data$T_group)
+
+set.seed(123)
+
+n <- nrow(model_data)
+idx <- sample(seq_len(n), size = floor(0.7 * n))   # 70% training
+
+train <- model_data[idx, ]
+test  <- model_data[-idx, ]
+
+
+rf_model <- randomForest(
+  T_group ~ ., 
+  data = train,
+  ntree = 500,       
+  mtry = 3,          
+  importance = TRUE
+)
+
+
+rf_pred <- predict(rf_model, test)
+
+rf_accuracy <- mean(rf_pred == test$T_group)
+rf_accuracy
+
+```
+```{r}
+#library(caret)
+rf_confusion <- table(Predicted = rf_pred, Actual = test$T_group)
+rf_confusion
+```
+
+
 
