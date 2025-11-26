@@ -9,6 +9,9 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 library(survival)
 library(survminer)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
 
 ```
 
@@ -59,25 +62,25 @@ nonsynonymous <- c(
   "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
   "Translation_Start_Site"
 )
-mut_filt <- mutations$Variant_Classification %in% nonsynonymous
+mut_filt <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
 
 ```
 
 **c. Gene x Patient Matrix**
 
-The Gene x Patient matrix turns raw muation calls into a form that allows clustering and other downstream data analysis methods. The matrix's row will be genes and its column is patient. If a mutation is present in a patient, then that cell will contain the value of one. Note that we are building a matrix for non-synonymous genes only.
+The Gene x Patient matrix turns raw mutation calls into a form that allows clustering and other downstream data analysis methods. The matrix's row will be genes and its column is patient. If a mutation is present in a patient, then that cell will contain the value of one. Note that we are building a matrix for non-synonymous genes only.
 
 ```{r}
-genes <- unique(mut_filtered$Hugo_Symbol)
-patients <- unique(mut_filtered$Patient_ID)
+genes <- unique(mut_filt$Hugo_Symbol)
+patients <- unique(mut_filt$Patient_ID)
 
 mut_matrix <- matrix(0, nrow = length(genes), ncol = length(patients))
 rownames(mut_matrix) <- genes
 colnames(mut_matrix) <- patients
 
-for (i in seq_len(nrow(mut_filtered))) {
-    g <- mut_filtered$Hugo_Symbol[i]
-    p <- mut_filtered$Patient_ID[i]
+for (i in seq_len(nrow(mut_filt))) {
+    g <- mut_filt$Hugo_Symbol[i]
+    p <- mut_filt$Patient_ID[i]
     mut_matrix[g, p] <- 1
 }
 ```
@@ -91,6 +94,7 @@ tmb <- colSums(mut_matrix)
 hist(tmb, breaks = 30, col = "seagreen", border = "black",
      main = "TMB Distribution",
      xlab = "Tumor Mutation Burden (# mutated genes)")
+tmb_filt <- tmb[tmb <= 800]
 ```
 
 **e. Transform Clinical Variables**
@@ -125,13 +129,14 @@ clinical$PFS_Status     <- parse_status(clinical$Progression.Free.Status)
 **f. Group Stage**
 ```{r}
 # Create grouped clinical stage
-clinical$Stage_Grouped <- clinical$Stage  # start with original
+clinical$Stage_Grouped <- clinical$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code  # start with original
 
 clinical$Stage_Grouped <- ifelse(grepl("^STAGE I$", clinical$Stage), "I",
                           ifelse(grepl("^STAGE II$", clinical$Stage), "II",
                           ifelse(grepl("^STAGE III", clinical$Stage), "III",
                           ifelse(grepl("^STAGE IV", clinical$Stage), "IV",
                                  NA))))
+clinical_NAStage <- clinical[!is.na(clinical$Stage_Grouped), ]
 ```
 
 ## 2.2. Clinical Exploration
@@ -172,9 +177,8 @@ ggplot(subset(clinical, Race.Category != "" & !is.na(Race.Category)),
 **d. Stage Distribution**
 ```{r}
 par(cex = 0.67)
-barplot(table(clinical$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code),
+barplot(table(clinical$Stage_Grouped),
         main = "Stage Distribution", las = 2, col = "seagreen")
-clinical$Stage <- clinical$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code
 ```
 
 **e. Survival Summaries**
@@ -183,6 +187,27 @@ summary(clinical$Overall_Time)
 summary(clinical$DFS_Time)
 summary(clinical$PFS_Time)
 summary(clinical$DSS_Time)
+
+# Select survival time columns
+surv_df <- clinical %>%
+  select(Overall_Time, DFS_Time, PFS_Time, DSS_Time)
+
+# Convert to long format for ggplot
+surv_long <- surv_df %>%
+  pivot_longer(cols = everything(),
+               names_to = "Endpoint",
+               values_to = "Time")
+
+# Boxplot
+ggplot(surv_long, aes(x = Endpoint, y = Time, fill = Endpoint)) +
+  geom_boxplot() +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Distribution of Survival Times",
+    y = "Time (months)",
+    x = ""
+  ) +
+  theme(legend.position = "none")
 ```
 
 ## 2.4. Mutation-Based Clusters
@@ -218,10 +243,19 @@ clinical2$Mutation_Cluster <- clusters
 
 **2.4.1. Cluster vs Clinical Characteristics**
 
+convert sex and cluster into factor, convert stage to ordered factor so that R does not treat them alphabetically
+
+Group stage early (1,2) and late (3,4) 
+Group stage (3,4)
+Remove rows with missing clinical data
+
+Construct cluster × sex and cluster × stage tables.
 ```{r}
 clinical2$Sex <- factor(clinical2$Sex)
+
 clinical2$Stage_Grouped <- factor(clinical2$Stage_Grouped,
                                   levels = c("I", "II", "III", "IV"), ordered = TRUE)
+
 clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
 
 clinical2$Stage_Binary <- ifelse(
@@ -244,6 +278,14 @@ clinical2$Stage_3Group <- factor(
     levels = c("I", "II", "III/IV")
 )
 
+clinical2 <- clinical2 %>%
+  dplyr::filter(
+    !is.na(Sex),
+    !is.na(Stage_Grouped),
+    !is.na(Stage_Binary),
+    !is.na(Stage_3Group)
+  )
+
 # Sex vs cluster
 table_sex <- table(clinical2$Mutation_Cluster, clinical2$Sex)
 table_sex
@@ -260,6 +302,13 @@ table_stage_3
 
 ```
 
+Chi-squared test requires:
+- large enough sample size where every cell has more than 5 observations
+Fisher test
+- find for small sample size but computationally slow
+
+To evaluate whether mutation-defined clusters differed by sex, we performed a chi-square test when all contingency table cells contained at least five patients, and Fisher’s exact test otherwise. This ensures appropriate handling of small cell counts and maintains the validity of the statistical inference.
+
 ```{r}
 if (any(table_sex < 5)) {
     test_sex <- fisher.test(table_sex)
@@ -269,16 +318,27 @@ if (any(table_sex < 5)) {
 test_sex
 ```
 
+A Wilcoxon rank-sum test was used to compare patient age between mutation clusters because age was non-normally distributed and sample sizes were unequal across clusters, violating t-test assumptions.
+
+
 ```{r}
 wilcox_age <- wilcox.test(Diagnosis.Age ~ Mutation_Cluster, data = clinical2)
 wilcox_age
 
+#for visual
 ggplot(clinical2, aes(x = Mutation_Cluster, y = Diagnosis.Age, fill = Mutation_Cluster)) +
     geom_boxplot() +
     labs(title = "Age Distribution Across Mutation Clusters",
          x = "Mutation Cluster", y = "Diagnosis Age") +
     theme_minimal()
 ```
+
+
+
+
+Similar to Sex variables, we will use Chi-squared test for stage to see if stage distribution differs between cluster. Fisher-exact test was used when stages are not grouped together and there were less than 5 observations for at least one cell in the table. 
+
+
 ```{r}
 if (any(table_stage < 5)) {
     test_stage <- fisher.test(table_stage)
@@ -287,23 +347,11 @@ if (any(table_stage < 5)) {
 }
 test_stage
 
-test_stage_bin <- fisher.test(table_stage_bin)
+test_stage_bin <- chisq.test(table_stage_bin)
 test_stage_bin
 
-test_stage_3 <- fisher.test(table_stage_3)
+test_stage_3 <- chisq.test(table_stage_3)
 test_stage_3
-
-ggplot(clinical2, aes(x = Mutation_Cluster, fill = Stage_Grouped)) +
-    geom_bar(position = "fill") +
-    labs(title = "Stage Distribution Across Mutation Clusters",
-         x = "Mutation Cluster", y = "Proportion") +
-    theme_minimal()
-
-ggplot(clinical2, aes(x = Mutation_Cluster, fill = Stage_Binary)) +
-    geom_bar(position = "fill") +
-    labs(title = "Early vs Late Stage Distribution Across Mutation Clusters",
-         x = "Mutation Cluster", y = "Proportion") +
-    theme_minimal()
 
 ggplot(clinical2, aes(x = Mutation_Cluster, fill = Stage_3Group)) +
     geom_bar(position = "fill") +
@@ -316,29 +364,19 @@ ggplot(clinical2, aes(x = Mutation_Cluster, fill = Stage_3Group)) +
 list(
   Sex_Association = test_sex,
   Age_Association = wilcox_age,
-  Stage_Association = test_stage
+  Stage_Association = test_stage_3
 )
 ```
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-## 2.5. Survival Analysis
+Now we are seeing if the clusters have different survival profile. We will construct Kaplan–Meier plot for each OS, DSS, DFS and PFS
 
 ```{r}
+#construct only column needed for KM plot
 os_data <- clinical2[, c("Overall_Time", "Overall_Status", "Mutation_Cluster")]
 os_data <- na.omit(os_data)
 
+#fit plot
 fit_os <- survfit(
   Surv(os_data$Overall_Time, os_data$Overall_Status) ~ Mutation_Cluster,
   data = os_data
@@ -394,92 +432,20 @@ ggsurvplot(fit_pfs, data = pfs_data,
            title = "PFS by Mutation Cluster")
 ```
 
-```{r}
-t.test(clinical2$Diagnosis.Age ~ clinical2$Mutation_Cluster)
-chisq.test(table(clinical2$Sex, clinical2$Mutation_Cluster))
-chisq.test(table(clinical2$Race.Category, clinical2$Mutation_Cluster))
-chisq.test(table(clinical2$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code,
-clinical2$Mutation_Cluster))
-t.test(tmb ~ clusters)
-```
+Question 6: Do mutation-defined patient clusters, derived from the top 10 most frequently mutated genes, differ in OS, DSS, PFS or DFS, independent of basic clinical variables (age, sex, stage)?
 
-
-
-## 2.6 Survival Analysis
-
-```{r}
-clinical2$Stage <- clinical$Stage[match(clinical2$Patient_ID, clinical$Patient_ID)]
-# Group IIIA/B/C → III and IV/IVA/IVB → IV
-clinical2$Stage_Grouped <- ifelse(grepl("^STAGE I$",  clinical2$Stage), "I",
-                           ifelse(grepl("^STAGE II$", clinical2$Stage), "II",
-                           ifelse(grepl("^STAGE III", clinical2$Stage), "III",
-                           ifelse(grepl("^STAGE IV", clinical2$Stage), "IV", NA))))
-
-clinical2$Stage_Grouped <- factor(clinical2$Stage_Grouped,
-                                  levels = c("I","II","III","IV"))
-
-library(survival)
-library(survminer)
-
-surv_data <- clinical[, c("Overall_Time", 
-                          "Overall_Status", 
-                          "Stage_Grouped", 
-                          "Diagnosis.Age",
-                          "Sex")]
-
-surv_data <- na.omit(surv_data)
-
-fit_stage <- survfit(
-  Surv(Overall_Time, Overall_Status) ~ Stage_Grouped,
-  data = surv_data
-)
-
-ggsurvplot(fit_stage, 
-           data = surv_data,
-           pval = TRUE,
-           risk.table = TRUE,
-           palette = "Set1",
-           title = "Overall Survival by Tumor Stage",
-           xlab = "Time (months)",
-           ylab = "Survival Probability")
-
-cox_stage <- coxph(
-  Surv(Overall_Time, Overall_Status) ~ Stage_Grouped,
-  data = surv_data
-)
-
-summary(cox_stage)
-
-cox_multiv <- coxph(
-  Surv(Overall_Time, Overall_Status) ~ Stage_Grouped + Diagnosis.Age + Sex,
-  data = surv_data
-)
-
-summary(cox_multiv)
-
-ggforest(cox_multiv,
-         data = surv_data,
-         main = "Multivariable Cox Model: Clinical Predictors of Overall Survival")
-
-fit_dfs <- survfit(Surv(DFS_Time, DFS_Status) ~ Stage_Grouped, data = clinical)
-ggsurvplot(fit_dfs)
-
-fit_pfs <- survfit(Surv(PFS_Time, PFS_Status) ~ Stage_Grouped, data = clinical)
-ggsurvplot(fit_pfs)
-```
+We are running adjusted, multivariable Cox regression across multiple survival endpoints to determine whether the mutation-derived clusters have independent prognostic significance.
 
 
 ```{r}
-library(survival)
-library(survminer)
-library(dplyr)
-
+#Convert variables to factors
 clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
 clinical2$Sex <- factor(clinical2$Sex)
 
-# choose stage variable (your 3-group version)
-stage_var <- if ("Stage_3Group" %in% names(clinical2)) "Stage_3Group" else "Stage_Grouped"
+# choose stage variable 
+stage_var <- "Stage_3Group"
 
+#Define all survival endpoints
 surv_endpoints <- list(
   OS  = c("Overall_Time", "Overall_Status"),
   DSS = c("DSS_Time",     "DSS_Status"),
@@ -529,7 +495,7 @@ clinical3 <- clinical2 %>%
 
 clinical3$Mutation_Cluster <- factor(clinical3$Mutation_Cluster)
 clinical3$Sex <- factor(clinical3$Sex)
-clinical3$Stage_3Group <- factor(clinical3$Stage_3Group)   # now only II and III/IV
+clinical3$Stage_3Group <- factor(clinical3$Stage_3Group)   #only II and III/IV
 
 surv_endpoints <- list(
   OS  = c("Overall_Time", "Overall_Status"),
@@ -591,12 +557,6 @@ surv_endpoints <- list(
   DFS = c("DFS_Time",     "DFS_Status"),
   PFS = c("PFS_Time",     "PFS_Status")
 )
-
-
-library(survival)
-library(survminer)
-library(dplyr)
-
 cox_TMB_results <- list()
 cox_TMB_results_adj <- list()
 
@@ -651,8 +611,6 @@ for (ep in names(surv_endpoints)) {
 }
 
 
-
-
 ```
 
 
@@ -665,56 +623,4 @@ Should provide an itemized list of investigations and analysis you have performe
 ## 4. Challenges
 
 Use this section to address any difficulties you are encountering, or expect you will encounter as you make progress with the project. This may include limitations of a current approach or a lack of meaningful results. Please explain why you believe this problem is occurring, and highlight any limitations in your data you have found.
-
-
-
-```{r}
-clinical$TMB <- colSums(mut_matrix)
-
-
-ggplot(clinical2, aes(x = Stage_Grouped, y = tmb, fill = Stage_Grouped)) +
-  geom_boxplot() +
-  theme_minimal() +
-  labs(title = "TMB per Stage",
-       x = "Tumor Stage",
-       y = "Tumor Mutation Burden") +
-  scale_fill_brewer(palette = "Set2")
-
-```
-
-
-
-```{r}
-# Top 20 most mutated genes
-gene_counts <- rowSums(mut_matrix)
-top_genes <- names(sort(gene_counts, decreasing = TRUE))[10:20]
-
-# Subset mutation matrix
-mut_top <- mut_matrix[top_genes, ]
-
-clinical2 <- clinical[match(colnames(mut_top), clinical$Patient_ID), ]
-
-# Group stage (if not done)
-clinical2$Stage_Grouped <- factor(clinical2$Stage_Grouped,
-                                  levels = c("I","II","III","IV"))
-
-pca <- prcomp(t(mut_top), center = TRUE, scale. = TRUE)
-
-
-pca_df <- data.frame(
-  PC1 = pca$x[,1],
-  PC2 = pca$x[,2],
-  Stage = clinical2$Stage_Grouped
-)
-
-ggplot(pca_df, aes(x = PC1, y = PC2, color = Stage)) +
-  geom_point(size = 3, alpha = 0.8) +
-  theme_minimal() +
-  labs(title = "PCA of Top 20 Mutated Genes",
-       x = paste0("PC1 (", round(summary(pca)$importance[2,1]*100, 1), "%)"),
-       y = paste0("PC2 (", round(summary(pca)$importance[2,2]*100, 1), "%)")) +
-  scale_color_brewer(palette = "Set1")
-```
-
-
 

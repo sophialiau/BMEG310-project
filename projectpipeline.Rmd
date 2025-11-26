@@ -59,7 +59,7 @@ nonsynonymous <- c(
   "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
   "Translation_Start_Site"
 )
-mut_filt <- mutations$Variant_Classification %in% nonsynonymous
+mut_filt <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
 
 ```
 
