@@ -1,0 +1,853 @@
+---
+title: "Sarah"
+author: "Sarah Dumont"
+date: "2025-11-25"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(readr)
+library(tibble)
+library(ggplot2)
+
+# --- Load Data ---
+clinical <- read_tsv(
+  "data_clinical_patient.txt",
+  comment = "#",
+  show_col_types = FALSE
+)
+
+mutation <- read.delim(
+  "data_mutations.txt",
+  sep = "\t",
+  header = TRUE,
+  stringsAsFactors = FALSE
+)
+
+# --- Helper: normalize TCGA IDs to first 12 chars with dashes ---
+normalize_tcga <- function(x) {
+  x <- as.character(x)
+  x <- gsub("\\.", "-", x)
+  substr(x, 1, 12)
+}
+
+# --- Get patient IDs in clinical and mutation data ---
+clin_ids <- unique(normalize_tcga(clinical$PATIENT_ID))
+mut_ids  <- unique(normalize_tcga(mutation$Tumor_Sample_Barcode))
+
+# Only keep patients that are in BOTH clinical and mutation datasets
+common_ids <- intersect(clin_ids, mut_ids)
+
+# --- Filter clinical to common patients (not actually used below, but kept for completeness) ---
+clinical <- clinical %>%
+  mutate(PATIENT_ID = normalize_tcga(PATIENT_ID)) %>%
+  filter(PATIENT_ID %in% common_ids)
+
+# --- Filter to NON-SYNONYMOUS mutations (single clean list) ---
+nonsynonymous <- c(
+  "Missense_Mutation", "Nonsense_Mutation",
+  "Nonstop_Mutation",
+  "Frame_Shift_Del", "Frame_Shift_Ins",
+  "In_Frame_Del", "In_Frame_Ins",
+  "Splice_Site", "Translation_Start_Site"
+)
+
+mutation_ns <- mutation %>%
+  mutate(PATIENT_ID = normalize_tcga(Tumor_Sample_Barcode)) %>%
+  filter(
+    Variant_Classification %in% nonsynonymous,
+    PATIENT_ID %in% common_ids
+  )
+
+# --- Build Gene × Patient mutation matrix (0/1) ---
+genes    <- sort(unique(mutation_ns$Hugo_Symbol))
+patients <- sort(unique(mutation_ns$PATIENT_ID))
+
+mut_matrix <- matrix(
+  0L,
+  nrow = length(genes),
+  ncol = length(patients),
+  dimnames = list(genes, patients)
+)
+
+for (i in seq_len(nrow(mutation_ns))) {
+  g <- mutation_ns$Hugo_Symbol[i]
+  p <- mutation_ns$PATIENT_ID[i]
+  mut_matrix[g, p] <- 1L
+}
+
+# --- Gene mutation frequencies across the cohort ---
+gene_freq <- rowSums(mut_matrix)  # how many patients mutated per gene
+
+top_n <- 20  # change this if you want more/less
+top_genes <- sort(gene_freq, decreasing = TRUE)[1:top_n]
+
+top_genes_df <- tibble(
+  Gene = names(top_genes),
+  Mutated_Patients = as.integer(top_genes)
+)
+
+
+
+```
+
+```{r}
+# --- Bar plot of most frequently mutated genes ---
+ggplot(top_genes_df,
+       aes(x = reorder(Gene, Mutated_Patients),
+           y = Mutated_Patients)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = paste("Top", top_n, "Most Frequently Mutated Genes"),
+    x = "Gene",
+    y = "Number of Patients with a Non-synonymous Mutation"
+  )
+```
+
+```{r}
+# --- Histogram of Mutation Counts per Gene ---
+
+# mutation count for each gene
+gene_mut_counts <- rowSums(mut_matrix)
+
+# put into a data frame
+gene_freq_df <- data.frame(
+  Gene = names(gene_mut_counts),
+  Count = as.numeric(gene_mut_counts)
+)
+
+# histogram
+ggplot(gene_freq_df, aes(x = Count)) +
+  geom_histogram(
+    bins = 50,
+    fill = "steelblue",
+    color = "black",
+    alpha = 0.7
+  ) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Distribution of Mutation Frequencies Across Genes",
+    x = "Number of Patients Mutated (per gene)",
+    y = "Number of Genes"
+  )
+
+```
+
+```{r}
+# Number of mutated genes per patient
+patient_mut_counts <- colSums(mut_matrix)
+
+# Mean TMB (mean mutated genes)
+mean_mutated_genes <- mean(patient_mut_counts)
+
+mean_mutated_genes
+
+```
+
+```{r}
+# Gene variance across patients (binary 0/1)
+gene_variance <- apply(mut_matrix, 1, var)
+
+# Sort descending
+gene_variance_sorted <- sort(gene_variance, decreasing = TRUE)
+
+# Look at the top variance genes
+head(gene_variance_sorted, 20)
+
+```
+
+```{r}
+
+# 1. Gene variance across patients
+gene_variance <- apply(mut_matrix, 1, var)
+
+# 2. Sort by variance (high → low)
+gene_variance_sorted <- sort(gene_variance, decreasing = TRUE)
+
+# 3. Basic variance curve (log scale)
+plot(
+  gene_variance_sorted,
+  type = "l",
+  log = "y",
+  lwd = 2,
+  col = "blue",
+  xlab = "Gene Rank (sorted by variance)",
+  ylab = "Variance (log scale)",
+  main = "Gene Variance Distribution with Elbow"
+)
+
+# 4. Approximate elbow via second derivative on log-variance
+y_log <- log10(gene_variance_sorted + 1e-10)  # avoid log(0)
+d1 <- diff(y_log)
+d2 <- diff(d1)
+
+# We look for the point of **maximum curvature**
+elbow <- which.max(-d2) + 1   # +1 to align with original index
+
+elbow
+
+# 5. Add vertical line at elbow
+abline(v = elbow, col = "red", lwd = 2, lty = 2)
+
+text(
+  x = elbow,
+  y = max(gene_variance_sorted),
+  labels = paste("Elbow =", elbow),
+  pos = 4,
+  col = "red"
+)
+
+# 6. Extract "significant" genes (above elbow)
+significant_genes <- names(gene_variance_sorted)[1:elbow]
+head(significant_genes)
+length(significant_genes)
+
+
+
+```
+
+✔ A small group of genes drive almost all variation ✔ Most genes in the genome are not mutated in this cancer type ✔ The “important” high-variance genes are the ones involved in the disease
+
+Top 6 most frequelntly mutated genes "TP53" "TTN" "CTNNB1" "MUC16" "ALB" "PCLO"
+
+```{r}
+# --- PCA to Assess Variance Structure ---
+
+# 1. Transpose mut_matrix → rows = patients, cols = genes
+X <- t(mut_matrix)
+
+# 2. PCA (center & scale recommended for binary mutation data)
+pca_res <- prcomp(X, center = TRUE, scale. = TRUE)
+
+# 3. Variance explained per PC
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+
+# 4. Cumulative variance explained
+cum_var <- cumsum(var_explained)
+
+# 5. Find how many PCs needed for 90% variance
+num_pcs_90 <- which(cum_var >= 0.99)[1]
+
+num_pcs_90
+
+```
+
+I ran PCA here to understand why we don't want to be using PCA! 270 PCAs is alot typically when doing PCA analysis we end up / want to end up with less then 10 PCAs, however here the reason that we have so many is because there is so many genes and some of them only have a couple mutations means that this will have low variance but becasue so many of them have low varianvce PCA needs alot more PCAs to achive 90 percent
+
+```{r}
+length(genes)
+```
+
+```{r}
+gene_variance <- apply(mut_matrix, 1, var)
+sort(gene_variance, decreasing = TRUE)[1:20]
+
+```
+
+Look into
+
+Question 1:
+
+Question 2: can a model be predicted that can accuratly determine the stage of cancer.
+
+```{r}
+# --- Find and collapse cancer stage into 1–4 ---
+stage_col <- "AJCC_PATHOLOGIC_TUMOR_STAGE"
+
+stage_col <- stage_candidates[1]     # use first match
+stage_col                             # prints the chosen column
+
+# 2) Function to clean stage strings
+clean_stage_to_14 <- function(x) {
+  x <- toupper(as.character(x))
+  x <- gsub("^STAGE\\s*", "", x)   # remove "Stage "
+  x <- gsub("[A]+$", "", x)      # remove letters A/B/C/etc.
+  x <- trimws(x)
+
+  dplyr::case_when(
+    x %in% c("I", "1")   ~ 1L,
+    x %in% c("II", "2")  ~ 2L,
+    x %in% c("III", "3") ~ 3L,
+    x %in% c("IV", "4")  ~ 4L,
+    TRUE ~ NA_integer_
+  )
+}
+
+# 3) Apply stage collapse
+clinical_stage <- clinical %>%
+  mutate(
+    Stage_raw = .data[[stage_col]],
+    Stage_num = clean_stage_to_14(Stage_raw),
+    Stage_grp = factor(
+      Stage_num,
+      levels = 1:4,
+      labels = paste("Stage", 1:4)
+    )
+  ) %>%
+  filter(!is.na(Stage_num)) %>%
+  select(PATIENT_ID, Stage_raw, Stage_num, Stage_grp)
+
+clinical_stage
+
+
+```
+
+```{r}
+
+
+tmb_stage <- tmb_df %>%
+  inner_join(clinical_stage, by = "PATIENT_ID")
+
+ggplot(tmb_stage, aes(x = Stage_grp, y = TMB)) +
+  geom_boxplot(fill = "lightblue", alpha = 0.5) +
+  geom_jitter(width = 0.2, alpha = 0.6) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Tumor Mutation Burden by Collapsed Stage (I–IV)",
+    x = "Stage (Grouped)",
+    y = "TMB (Non-synonymous Mutations)"
+  )
+
+```
+
+Look into the TMB to see if maybe total number of mutations could be an indicator of stage of cancer. From this box plot it looks like most are in similar ranges meaning purely quantity of mutated genes is not a good indicator. So further analysis on specifc mutated genes would potenitally be a better indicator of cancer stage be a better indicator
+
+TMB alone is not a good staging biomarker These box plots do not have enough variation a model will not be able to distiguish these catigoeies
+
+```{r}
+# Count patients per collapsed stage
+table(clinical_stage$Stage_grp)
+
+# Or a nicer data frame
+stage_counts <- clinical_stage %>%
+  count(Stage_grp)
+
+stage_counts
+
+```
+
+Troubles: cannot do with by simply splitting stages because stage for only has 4 patients so we will combine into early and late stage cancer instead.
+
+```{r}
+
+# Cobine into Early Stage and Late Stage
+clinical_stage <- clinical_stage %>%
+  mutate(
+    Stage_binary_2 = case_when(
+      Stage_num %in% c(1, 2) ~ "Early Stages",
+      Stage_num %in% c(3, 4) ~ "Late Stages",
+      TRUE ~ NA_character_
+    ),
+    Stage_binary_2 = factor(
+      Stage_binary_2,
+      levels = c("Early Stages", "Late Stages")
+    )
+  )
+
+```
+
+```{r}
+gene_freq <- rowSums(mut_matrix)
+top_genes <- names(sort(gene_freq, decreasing = TRUE))[1:100] # look at top 50 mutated genes
+top_genes
+
+# Build patient × gene table
+gene_df <- t(mut_matrix[top_genes, ]) %>%
+  as.data.frame() %>%
+  mutate(PATIENT_ID = rownames(.)) %>%
+  inner_join(clinical_stage, by = "PATIENT_ID")
+
+# Calculate mutation proportion per stage
+stage_gene_freq <- gene_df %>%
+  group_by(Stage_binary_2) %>%
+  summarise(across(top_genes, mean))
+
+stage_gene_freq
+#write.table(stage_gene_freq, row.names = FALSE, sep = ",")
+```
+
+```{r}
+
+# Get just the gene columns (everything except Stage_binary_2)
+genes <- setdiff(names(stage_gene_freq), "Stage_binary_2")
+
+# Extract rows for Early and Late
+early_row <- stage_gene_freq %>%
+  filter(Stage_binary_2 == "Early Stages") %>%
+  select(all_of(genes))
+
+late_row <- stage_gene_freq %>%
+  filter(Stage_binary_2 == "Late Stages") %>%
+  select(all_of(genes))
+
+# Compute Late - Early for each gene
+diff_vec <- as.numeric(late_row[1, ] - early_row[1, ])
+
+# Build a table: gene, difference, absolute difference
+gene_diff_tbl <- tibble(
+  Gene     = genes,
+  Diff     = diff_vec,           # Late - Early (signed)
+  Abs_Diff = abs(diff_vec)       # absolute difference
+) %>%
+  arrange(desc(Abs_Diff))         # sort by largest absolute difference
+
+gene_diff_tbl <- gene_diff_tbl[1:10, ]
+
+# If you want an easy copy/paste version:
+write.table(gene_diff_tbl, row.names = FALSE, sep = ",")
+
+```
+
+```{r}
+
+
+
+# --- Top 50 most mutated genes (from your mutation matrix) ---
+gene_freq <- rowSums(mut_matrix)
+top_50_genes <- names(sort(gene_freq, decreasing = TRUE))[1:100]
+
+# lookup: gene -> rank 1..50 within top-50 list
+top50_rank_lookup <- setNames(seq_along(top_50_genes), top_50_genes)
+
+# --- Add ranks (1–10 by difference, + rank within top-50) ---
+gene_diff_ranked <- gene_diff_tbl %>%
+  mutate(
+    DiffRank = row_number(),                 # 1..10 (already sorted)
+    Rank_in_Top50 = top50_rank_lookup[Gene]  # 1..50 or NA if not in top 50
+  )
+
+gene_diff_ranked
+
+```
+
+```{r}
+# Plot mutation proportion for Top 10 different genes
+top10_genes <- gene_diff_tbl$Gene[1:10]
+
+bar_df <- stage_gene_freq %>%
+  select(Stage_binary_2, all_of(top10_genes)) %>%
+  pivot_longer(cols = all_of(top10_genes),
+               names_to = "Gene",
+               values_to = "Proportion")
+
+ggplot(bar_df, aes(x = Gene, y = Proportion, fill = Stage_binary_2)) +
+  geom_col(position = "dodge") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Mutation Proportions of Top 4 Differentiating Genes",
+    y = "Proportion Mutated"
+  )
+
+```
+
+```{r}
+# Step 1 — Take the top 25 highest-difference genes
+top25_diff <- gene_diff_ranked %>%
+  slice(1:30)
+
+# Step 2 — Keep only genes that are ALSO within the top 20 most-mutated
+top25_filtered <- top25_diff %>%
+  filter(Rank_in_Top50 <= 30)
+
+top25_filtered$Gene
+
+
+
+```
+
+This shows that after performing some preliminary re-organization of the data, we now have a structured set of mutation features that can more effectively separate cancer stages into early and late groups. This improves the usefulness of the dataset and should increase the accuracy of any future predictive models by ensuring they are trained on meaningful, relevant information — garbage in, garbage out.
+
+Additionally, we can now see that DNAH6 appears only in the early-stage group. This suggests that DNAH6 may be a particularly valuable feature for helping the model distinguish between early and late cancer stages.
+
+
+```{r}
+# clinical_stage should already have: PATIENT_ID, Stage_num, Stage_grp, Stage_binary_2, etc.
+# If not, this rebuilds it quickly:
+
+clean_stage_to_14 <- function(x) {
+  x <- toupper(as.character(x))
+  x <- gsub("^STAGE\\s*", "", x)
+  x <- gsub("[A]+$", "", x)
+  x <- trimws(x)
+
+  dplyr::case_when(
+    x %in% c("I", "1")   ~ 1L,
+    x %in% c("II", "2")  ~ 2L,
+    x %in% c("III", "3") ~ 3L,
+    x %in% c("IV", "4")  ~ 4L,
+    TRUE ~ NA_integer_
+  )
+}
+
+clinical_stage <- clinical %>%
+  mutate(
+    Stage_raw = AJCC_PATHOLOGIC_TUMOR_STAGE,
+    Stage_num = clean_stage_to_14(Stage_raw),
+    Stage_lowhigh = case_when(
+      Stage_num %in% c(1, 2) ~ "Low Stage",   # Stage I–II
+      Stage_num %in% c(3, 4) ~ "High Stage",  # Stage III–IV
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Stage_lowhigh)) %>%
+  select(PATIENT_ID, Stage_num, Stage_lowhigh)
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+library(dplyr)
+library(e1071)
+
+# --------------------------------
+# 1. Gene list for the model
+# --------------------------------
+
+genes_for_model <- gene_diff_tbl$Gene[1:30]
+
+
+# keep only genes that exist in mut_matrix
+genes_for_model <- intersect(genes_for_model, rownames(mut_matrix))
+genes_for_model
+
+# --------------------------------
+# 2. Build patient × gene + stage data
+# --------------------------------
+
+mut_df <- t(mut_matrix[genes_for_model, , drop = FALSE]) %>%
+  as.data.frame() %>%
+  mutate(PATIENT_ID = rownames(.))
+
+# clinical_stage must have PATIENT_ID and Stage_lowhigh ("Low Stage", "High Stage")
+df <- mut_df %>%
+  inner_join(
+    clinical_stage %>% select(PATIENT_ID, Stage_lowhigh),
+    by = "PATIENT_ID"
+  ) %>%
+  filter(!is.na(Stage_lowhigh))
+
+df$Stage_lowhigh <- factor(df$Stage_lowhigh)
+table(df$Stage_lowhigh)
+
+# --------------------------------
+# 3. Stratified 70/30 train–test split
+# --------------------------------
+
+set.seed(13)
+
+low  <- df %>% filter(Stage_lowhigh == "Low Stage")
+high <- df %>% filter(Stage_lowhigh == "High Stage")
+
+low_idx  <- sample(seq_len(nrow(low)),  size = floor(0.75 * nrow(low)))
+high_idx <- sample(seq_len(nrow(high)), size = floor(0.75 * nrow(high)))
+
+train <- bind_rows(low[low_idx, ],  high[high_idx, ])
+test  <- bind_rows(low[-low_idx, ], high[-high_idx, ])
+
+table(train$Stage_lowhigh)
+table(test$Stage_lowhigh)
+
+# --------------------------------
+# 4. Fit Naive Bayes model
+# --------------------------------
+
+train_nb <- train[, c(genes_for_model, "Stage_lowhigh")]
+
+nb_model <- naiveBayes(
+  Stage_lowhigh ~ .,
+  data = train_nb
+)
+
+# --------------------------------
+# 5. Predict with probability threshold
+# --------------------------------
+
+# raw class probabilities on test set
+nb_prob <- predict(nb_model, newdata = test[, genes_for_model, drop = FALSE],
+                   type = "raw")
+
+# choose threshold for "High Stage"
+threshold <- 0.999 # <-- change this to 0.5, 0.7, etc. to tune behaviour
+
+nb_pred <- ifelse(nb_prob[, "High Stage"] > threshold,
+                  "High Stage", "Low Stage")
+
+nb_pred <- factor(nb_pred, levels = levels(df$Stage_lowhigh))
+
+# --------------------------------
+# 6. Accuracy + confusion matrix
+# --------------------------------
+
+nb_accuracy <- mean(nb_pred == test$Stage_lowhigh)
+nb_accuracy
+
+nb_confusion <- table(Predicted = nb_pred, Actual = test$Stage_lowhigh)
+nb_confusion
+
+```
+
+
+Because Naive Bayes tends to produce extremely high or low probabilities on this sparse mutation data, a very high decision threshold (0.999) was used for calling a tumor “High Stage”. This biases the classifier toward catching almost all truly high-stage tumors (sensitivity ≈ 94%), but at the cost of low specificity (≈ 32%) and modest overall accuracy (≈ 46%).
+
+
+Could be a valid model because it rarely misses the high 
+
+```{r}
+library(pROC)
+library(ggplot2)
+library(dplyr)
+
+# --------------------------------
+# 1. Basic Metrics
+# --------------------------------
+
+nb_accuracy
+nb_confusion
+
+# Compute sensitivity, specificity, precision, recall, F1
+TP <- nb_confusion["High Stage", "High Stage"]
+TN <- nb_confusion["Low Stage",  "Low Stage"]
+FP <- nb_confusion["High Stage", "Low Stage"]
+FN <- nb_confusion["Low Stage",  "High Stage"]
+
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+precision   <- TP / (TP + FP)
+recall      <- sensitivity
+F1          <- 2 * (precision * recall) / (precision + recall)
+
+metrics <- tibble(
+  Metric = c("Accuracy", "Sensitivity (Recall)", "Specificity",
+             "Precision", "F1 Score"),
+  Value = c(nb_accuracy, sensitivity, specificity, precision, F1)
+)
+
+metrics
+
+```
+
+
+
+
+
+
+
+```{r}
+
+library(dplyr)
+library(e1071)
+
+# --------------------------------
+# 1. Gene list for the model
+# --------------------------------
+
+gene_freq <- rowSums(mut_matrix)
+genes_for_model_2 <- names(sort(gene_freq, decreasing = TRUE))[1:30] # look at top 50 mutated genes
+
+
+gene_freq <- rowSums(mut_matrix)
+genes_for_model_2 <- names(sort(gene_freq, decreasing = TRUE))[1]
+
+
+# keep only genes that exist in mut_matrix
+genes_for_model_2 <- intersect(genes_for_model_2, rownames(mut_matrix))
+genes_for_model_2
+
+# --------------------------------
+# 2. Build patient × gene + stage data
+# --------------------------------
+
+mut_df <- t(mut_matrix[genes_for_model_2, , drop = FALSE]) %>%
+  as.data.frame() %>%
+  mutate(PATIENT_ID = rownames(.))
+
+genes_for_model
+
+# clinical_stage must have PATIENT_ID and Stage_lowhigh ("Low Stage", "High Stage")
+df <- mut_df %>%
+  inner_join(
+    clinical_stage %>% select(PATIENT_ID, Stage_lowhigh),
+    by = "PATIENT_ID"
+  ) %>%
+  filter(!is.na(Stage_lowhigh))
+
+df$Stage_lowhigh <- factor(df$Stage_lowhigh)
+table(df$Stage_lowhigh)
+
+# --------------------------------
+# 3. Stratified 70/30 train–test split
+# --------------------------------
+
+set.seed(13)
+
+low  <- df %>% filter(Stage_lowhigh == "Low Stage")
+high <- df %>% filter(Stage_lowhigh == "High Stage")
+
+low_idx  <- sample(seq_len(nrow(low)),  size = floor(0.75 * nrow(low)))
+high_idx <- sample(seq_len(nrow(high)), size = floor(0.75 * nrow(high)))
+
+train <- bind_rows(low[low_idx, ],  high[high_idx, ])
+test  <- bind_rows(low[-low_idx, ], high[-high_idx, ])
+
+table(train$Stage_lowhigh)
+table(test$Stage_lowhigh)
+
+# --------------------------------
+# 4. Fit Naive Bayes model
+# --------------------------------
+
+train_nb <- train[, c(genes_for_model_2, "Stage_lowhigh")]
+
+nb_model <- naiveBayes(
+  Stage_lowhigh ~ .,
+  data = train_nb
+)
+
+# --------------------------------
+# 5. Predict with probability threshold
+# --------------------------------
+
+# raw class probabilities on test set
+nb_prob <- predict(nb_model, newdata = test[, genes_for_model_2, drop = FALSE],
+                   type = "raw")
+
+# choose threshold for "High Stage"
+threshold <- 0.999 # <-- change this to 0.5, 0.7, etc. to tune behaviour
+
+nb_pred <- ifelse(nb_prob[, "High Stage"] > threshold,
+                  "High Stage", "Low Stage")
+
+nb_pred <- factor(nb_pred, levels = levels(df$Stage_lowhigh))
+
+# --------------------------------
+# 6. Accuracy + confusion matrix
+# --------------------------------
+
+nb_accuracy <- mean(nb_pred == test$Stage_lowhigh)
+nb_accuracy
+
+nb_confusion <- table(Predicted = nb_pred, Actual = test$Stage_lowhigh)
+nb_confusion
+
+```
+
+
+
+
+```{r}
+library(dplyr)
+library(e1071)
+
+# df must already exist and have:
+# - one column per gene in genes_for_model
+# - PATIENT_ID
+# - Stage_lowhigh (factor with "Low Stage", "High Stage")
+
+# ---- function: run Naive Bayes once for a given seed ----
+run_nb_once <- function(seed, df, genes_for_model, threshold = 0.999) {
+  set.seed(seed)
+  
+  # stratified split 75/25
+  low  <- df %>% filter(Stage_lowhigh == "Low Stage")
+  high <- df %>% filter(Stage_lowhigh == "High Stage")
+  
+  low_idx  <- sample(seq_len(nrow(low)),  size = floor(0.75 * nrow(low)))
+  high_idx <- sample(seq_len(nrow(high)), size = floor(0.75 * nrow(high)))
+  
+  train <- bind_rows(low[low_idx, ],  high[high_idx, ])
+  test  <- bind_rows(low[-low_idx, ], high[-high_idx, ])
+  
+  # fit NB on selected genes
+  train_nb <- train[, c(genes_for_model, "Stage_lowhigh")]
+  nb_model <- naiveBayes(Stage_lowhigh ~ ., data = train_nb)
+  
+  # predict probabilities
+  nb_prob <- predict(
+    nb_model,
+    newdata = test[, genes_for_model, drop = FALSE],
+    type = "raw"
+  )
+  
+  # hard classification with threshold on P(High Stage)
+  nb_pred <- ifelse(nb_prob[, "High Stage"] > threshold,
+                    "High Stage", "Low Stage")
+  nb_pred <- factor(nb_pred, levels = levels(df$Stage_lowhigh))
+  
+  # confusion matrix
+  cm <- table(Predicted = nb_pred, Actual = test$Stage_lowhigh)
+  
+  # make sure all cells exist
+  TP <- cm["High Stage", "High Stage"] %||% 0
+  TN <- cm["Low Stage",  "Low Stage"]  %||% 0
+  FP <- cm["High Stage", "Low Stage"]  %||% 0
+  FN <- cm["Low Stage",  "High Stage"] %||% 0
+  
+  accuracy    <- (TP + TN) / (TP + TN + FP + FN)
+  sensitivity <- if ((TP + FN) > 0) TP / (TP + FN) else NA
+  specificity <- if ((TN + FP) > 0) TN / (TN + FP) else NA
+  precision   <- if ((TP + FP) > 0) TP / (TP + FP) else NA
+  F1          <- if (!is.na(precision) && !is.na(sensitivity) &&
+                     (precision + sensitivity) > 0) {
+    2 * precision * sensitivity / (precision + sensitivity)
+  } else {
+    NA
+  }
+  
+  tibble(
+    seed        = seed,
+    accuracy    = accuracy,
+    sensitivity = sensitivity,
+    specificity = specificity,
+    precision   = precision,
+    F1          = F1
+  )
+}
+
+# little helper for missing cells in confusion matrix
+`%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
+
+# ---- run over many seeds ----
+seeds <- 1:50   # try 50 different random splits
+
+nb_results <- purrr::map_dfr(
+  seeds,
+  ~run_nb_once(.x, df = df, genes_for_model = genes_for_model, threshold = 0.999)
+)
+
+# look at average + spread of metrics
+summary_stats <- nb_results %>%
+  summarise(
+    across(
+      c(accuracy, sensitivity, specificity, precision, F1),
+      list(mean = mean, sd = sd),
+      na.rm = TRUE
+    )
+  )
+
+nb_results
+summary_stats
+
+```
+
+
+
+
+
+
+
