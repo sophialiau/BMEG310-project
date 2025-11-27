@@ -847,7 +847,98 @@ summary_stats
 
 
 
+```{r}
+library(dplyr)
+library(e1071)
 
+
+genes_for_model_2 <- intersect(genes_for_model_2, colnames(train))
+train_nb <- train[, c(genes_for_model_2, "Stage_lowhigh")]
+
+
+run_nb_once <- function(seed, df, genes_for_model_2, threshold = 0.999) {
+  set.seed(seed)
+  
+  # stratified split 75/25
+  low  <- df %>% filter(Stage_lowhigh == "Low Stage")
+  high <- df %>% filter(Stage_lowhigh == "High Stage")
+  
+  low_idx  <- sample(seq_len(nrow(low)),  size = floor(0.75 * nrow(low)))
+  high_idx <- sample(seq_len(nrow(high)), size = floor(0.75 * nrow(high)))
+  
+  train <- bind_rows(low[low_idx, ],  high[high_idx, ])
+  test  <- bind_rows(low[-low_idx, ], high[-high_idx, ])
+  
+  # fit NB on selected genes
+  train_nb <- train[, c(genes_for_model_2, "Stage_lowhigh")]
+  nb_model <- naiveBayes(Stage_lowhigh ~ ., data = train_nb)
+  
+  # predict probabilities
+  nb_prob <- predict(
+    nb_model,
+    newdata = test[, genes_for_model_2, drop = FALSE],
+    type = "raw"
+  )
+  
+  # hard classification with threshold on P(High Stage)
+  nb_pred <- ifelse(nb_prob[, "High Stage"] > threshold,
+                    "High Stage", "Low Stage")
+  nb_pred <- factor(nb_pred, levels = levels(df$Stage_lowhigh))
+  
+  # confusion matrix
+  cm <- table(Predicted = nb_pred, Actual = test$Stage_lowhigh)
+  
+  # make sure all cells exist
+  TP <- cm["High Stage", "High Stage"] %||% 0
+  TN <- cm["Low Stage",  "Low Stage"]  %||% 0
+  FP <- cm["High Stage", "Low Stage"]  %||% 0
+  FN <- cm["Low Stage",  "High Stage"] %||% 0
+  
+  accuracy    <- (TP + TN) / (TP + TN + FP + FN)
+  sensitivity <- if ((TP + FN) > 0) TP / (TP + FN) else NA
+  specificity <- if ((TN + FP) > 0) TN / (TN + FP) else NA
+  precision   <- if ((TP + FP) > 0) TP / (TP + FP) else NA
+  F1          <- if (!is.na(precision) && !is.na(sensitivity) &&
+                     (precision + sensitivity) > 0) {
+    2 * precision * sensitivity / (precision + sensitivity)
+  } else {
+    NA
+  }
+  
+  tibble(
+    seed        = seed,
+    accuracy    = accuracy,
+    sensitivity = sensitivity,
+    specificity = specificity,
+    precision   = precision,
+    F1          = F1
+  )
+}
+
+# little helper for missing cells in confusion matrix
+`%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
+
+# ---- run over many seeds ----
+seeds <- 1:50   # try 50 different random splits
+
+nb_results <- purrr::map_dfr(
+  seeds,
+  ~run_nb_once(.x, df = df, genes_for_model_2 = genes_for_model_2, threshold = 0.999)
+)
+
+# look at average + spread of metrics
+summary_stats <- nb_results %>%
+  summarise(
+    across(
+      c(accuracy, sensitivity, specificity, precision, F1),
+      list(mean = mean, sd = sd),
+      na.rm = TRUE
+    )
+  )
+
+nb_results
+summary_stats
+```
 
 
 
