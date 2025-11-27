@@ -19,6 +19,8 @@ library(ggplot2)
 library(tidyr)
 library(e1071)
 library(purrr)
+library(survival)
+library(survminer)
 
 ```
 
