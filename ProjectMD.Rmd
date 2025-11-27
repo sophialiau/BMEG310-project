@@ -241,6 +241,7 @@ clusters <- cutree(hc, k = 2)
 clinical2$Mutation_Cluster <- clusters
 ```
 
+
 **2.4.1. Cluster vs Clinical Characteristics**
 
 convert sex and cluster into factor, convert stage to ordered factor so that R does not treat them alphabetically
@@ -278,26 +279,27 @@ clinical2$Stage_3Group <- factor(
     levels = c("I", "II", "III/IV")
 )
 
-clinical2 <- clinical2 %>%
-  dplyr::filter(
-    !is.na(Sex),
-    !is.na(Stage_Grouped),
-    !is.na(Stage_Binary),
-    !is.na(Stage_3Group)
-  )
+clinical3 <- clinical2 %>%
+    dplyr::filter(
+        !is.na(Sex),
+        !is.na(Stage_Grouped),
+        !is.na(Stage_Binary),
+        !is.na(Stage_3Group),
+        !is.na(Mutation_Cluster)
+    )
 
 # Sex vs cluster
-table_sex <- table(clinical2$Mutation_Cluster, clinical2$Sex)
+table_sex <- table(clinical3$Mutation_Cluster, clinical3$Sex)
 table_sex
 
 # Stage vs cluster
-table_stage <- table(clinical2$Mutation_Cluster, clinical2$Stage_Grouped)
+table_stage <- table(clinical3$Mutation_Cluster, clinical3$Stage_Grouped)
 table_stage
 
-table_stage_bin <- table(clinical2$Mutation_Cluster, clinical2$Stage_Binary)
+table_stage_bin <- table(clinical3$Mutation_Cluster, clinical3$Stage_Binary)
 table_stage_bin
 
-table_stage_3 <- table(clinical2$Mutation_Cluster, clinical2$Stage_3Group)
+table_stage_3 <- table(clinical3$Mutation_Cluster, clinical3$Stage_3Group)
 table_stage_3
 
 ```
@@ -316,17 +318,27 @@ if (any(table_sex < 5)) {
     test_sex <- chisq.test(table_sex)
 }
 test_sex
+prop_sex <- prop.table(table_sex, margin = 1)
+
+barplot(t(prop_sex),
+        beside = TRUE,
+        col = c("#E76F51", "#2A9D8F"),
+        legend = TRUE,
+        xlab = "Mutation Cluster",
+        ylab = "Proportion",
+        main = "Proportion of Sex Within Each Mutation Cluster")
 ```
 
 A Wilcoxon rank-sum test was used to compare patient age between mutation clusters because age was non-normally distributed and sample sizes were unequal across clusters, violating t-test assumptions.
 
 
 ```{r}
+clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
 wilcox_age <- wilcox.test(Diagnosis.Age ~ Mutation_Cluster, data = clinical2)
 wilcox_age
 
 #for visual
-ggplot(clinical2, aes(x = Mutation_Cluster, y = Diagnosis.Age, fill = Mutation_Cluster)) +
+ggplot(clinical3, aes(x = Mutation_Cluster, y = Diagnosis.Age, fill = Mutation_Cluster)) +
     geom_boxplot() +
     labs(title = "Age Distribution Across Mutation Clusters",
          x = "Mutation Cluster", y = "Diagnosis Age") +
@@ -353,9 +365,9 @@ test_stage_bin
 test_stage_3 <- chisq.test(table_stage_3)
 test_stage_3
 
-ggplot(clinical2, aes(x = Mutation_Cluster, fill = Stage_3Group)) +
+ggplot(clinical3, aes(x = Mutation_Cluster, fill = Stage_Grouped)) +
     geom_bar(position = "fill") +
-    labs(title = "Stage Distribution (I, II, III/IV) Across Mutation Clusters",
+    labs(title = "Stage Distribution (I, II, III, IV) Across Mutation Clusters",
          x = "Mutation Cluster", y = "Proportion") +
     theme_minimal()
 ```
@@ -383,7 +395,7 @@ fit_os <- survfit(
 )
 
 ggsurvplot(fit_os, data = os_data,
-           pval = TRUE, risk.table = TRUE,
+           pval = TRUE, risk.table = FALSE,
            title = "Overall Survival by Mutation Cluster",
            legend.title = "Cluster")
 ```
@@ -398,7 +410,7 @@ fit_dss <- survfit(
 )
 
 ggsurvplot(fit_dss, data = dss_data,
-           pval = TRUE, risk.table = TRUE,
+           pval = TRUE, risk.table = FALSE,
            title = "DSS by Mutation Cluster")
 
 ```
@@ -413,7 +425,7 @@ fit_dfs <- survfit(
 )
 
 ggsurvplot(fit_dfs, data = dfs_data,
-           pval = TRUE, risk.table = TRUE,
+           pval = TRUE, risk.table = FALSE,
            title = "DFS by Mutation Cluster")
 ```
 
@@ -428,7 +440,7 @@ fit_pfs <- survfit(
 )
 
 ggsurvplot(fit_pfs, data = pfs_data,
-           pval = TRUE, risk.table = TRUE,
+           pval = TRUE, risk.table = FALSE,
            title = "PFS by Mutation Cluster")
 ```
 
@@ -488,55 +500,14 @@ for (ep in names(surv_endpoints)) {
 
 ```
 
-```{r}
-clinical3 <- clinical2 %>% 
-  filter(Stage_3Group != "I") %>% 
-  droplevels()
-
-clinical3$Mutation_Cluster <- factor(clinical3$Mutation_Cluster)
-clinical3$Sex <- factor(clinical3$Sex)
-clinical3$Stage_3Group <- factor(clinical3$Stage_3Group)   #only II and III/IV
-
-surv_endpoints <- list(
-  OS  = c("Overall_Time", "Overall_Status"),
-  DSS = c("DSS_Time",     "DSS_Status"),
-  DFS = c("DFS_Time",     "DFS_Status"),
-  PFS = c("PFS_Time",     "PFS_Status")
-)
-
-cox_results_stage23 <- list()
-
-for (ep in names(surv_endpoints)) {
-  
-  time_col  <- surv_endpoints[[ep]][1]
-  event_col <- surv_endpoints[[ep]][2]
-  
-  # skip if missing
-  if (!all(c(time_col, event_col) %in% colnames(clinical3))) {
-    message("Skipping ", ep, " — missing columns.")
-    next
-  }
-
-  formula_string <- paste0(
-    "Surv(", time_col, ", ", event_col, ") ~ ",
-    "Mutation_Cluster + Diagnosis.Age + Sex + Stage_3Group"
-  )
-  
-  fit <- coxph(as.formula(formula_string), data = clinical3)
-  cox_results_stage23[[ep]] <- fit
-  
-  cat("\n======================================\n")
-  cat(" Multivariable Cox (Stage II–IV only): ", ep, "\n")
-  cat("======================================\n")
-  print(summary(fit))
-}
-
-
-```
 
 
 
-Quetsion 7: 
+
+
+
+Quetsion 7: Does Tumour Mutation Burden (TMB) influence overall survival (OS), disease-specific survival (DSS), progression-free survival (PFS), or disease-free survival (DFS) in this cancer cohort?
+
 
 ```{r}
 # mut_matrix is gene x patient with 0/1 mutation presence
@@ -548,7 +519,7 @@ clinical2$logTMB <- log1p(clinical2$TMB)   # handles TMB=0 safely
 clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
 clinical2$Sex <- factor(clinical2$Sex)
 
-stage_var <- if ("Stage_3Group" %in% names(clinical2)) "Stage_3Group" else "Stage_Grouped"
+stage_var <- "Stage_3Group"
 
 
 surv_endpoints <- list(

@@ -12,12 +12,14 @@ output: html_document
 ```{r}
 #loaded Libraries 
 
-library(dplyr)
 library(readr)
 library(tibble)
+library(e1071)
+library(survival)
+library(survminer)
 library(ggplot2)
 library(tidyr)
-library(e1071)
+library(dplyr)
 ```
 
 
@@ -774,6 +776,486 @@ summary_stats <- nb_results %>%
 nb_results
 summary_stats
 ```
+
+Investigation 3-5 starts here
+
+```{r}
+clinical <- read.delim("data_clinical_patient.txt", header = TRUE,
+                      sep = "\t", stringsAsFactors = FALSE)
+mutations <- read.delim("data_mutations.txt", header = TRUE,
+                      sep = "\t", stringsAsFactors = FALSE)
+                       
+```
+
+```{r}
+clinical$Patient_ID <- clinical$X.Patient.Identifier
+mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
+
+common_ids <- intersect(clinical$Patient_ID, mutations$Patient_ID)
+clinical <- clinical[clinical$Patient_ID %in% common_ids, ]
+mutations <- mutations[mutations$Patient_ID %in% common_ids, ]
+
+nonsynonymous <- c(
+  "Missense_Mutation", "Nonsense_Mutation",
+  "Frame_Shift_Del", "Frame_Shift_Ins",
+  "In_Frame_Del", "In_Frame_Ins",
+  "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
+  "Translation_Start_Site"
+)
+mut_filt <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
+
+genes <- unique(mut_filt$Hugo_Symbol)
+patients <- unique(mut_filt$Patient_ID)
+
+mut_matrix <- matrix(0, nrow = length(genes), ncol = length(patients))
+rownames(mut_matrix) <- genes
+colnames(mut_matrix) <- patients
+
+for (i in seq_len(nrow(mut_filt))) {
+    g <- mut_filt$Hugo_Symbol[i]
+    p <- mut_filt$Patient_ID[i]
+    mut_matrix[g, p] <- 1
+}
+parse_status <- function(x) {
+    as.numeric(sub(":.*", "", x))
+}
+
+# Convert time strings ("63.72") to numeric
+parse_time <- function(x) {
+    as.numeric(trimws(x))
+}
+
+# Age
+clinical$Diagnosis.Age <- parse_time(clinical$Diagnosis.Age)
+# Survival Times
+clinical$Overall_Time  <- parse_time(clinical$Overall.Survival..Months.)
+clinical$DSS_Time      <- parse_time(clinical$Months.of.disease.specific.survival)
+clinical$DFS_Time      <- parse_time(clinical$Disease.Free..Months.)
+clinical$PFS_Time      <- parse_time(clinical$Progress.Free.Survival..Months.)
+# Survival Status
+clinical$Overall_Status <- parse_status(clinical$Overall.Survival.Status)
+clinical$DSS_Status     <- parse_status(clinical$Disease.specific.Survival.status)
+clinical$DFS_Status     <- parse_status(clinical$Disease.Free.Status)
+clinical$PFS_Status     <- parse_status(clinical$Progression.Free.Status)
+
+tmb <- colSums(mut_matrix)
+hist(tmb, breaks = 30, col = "seagreen", border = "black",
+     main = "TMB Distribution",
+     xlab = "Tumor Mutation Burden (# mutated genes)")
+
+# Create grouped clinical stage
+clinical$Stage_Grouped <- clinical$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code  # start with original
+
+clinical$Stage_Grouped <- ifelse(grepl("^STAGE I$", clinical$Stage), "I",
+                          ifelse(grepl("^STAGE II$", clinical$Stage), "II",
+                          ifelse(grepl("^STAGE III", clinical$Stage), "III",
+                          ifelse(grepl("^STAGE IV", clinical$Stage), "IV",
+                                 NA))))
+clinical_NAStage <- clinical[!is.na(clinical$Stage_Grouped), ]
+```
+
+
+
+### Section 21 ###
+
+```{r}
+age_data <- clinical[!is.na(clinical$Diagnosis.Age), ]
+par(cex = 0.67)
+hist(age_data$Diagnosis.Age,
+     main = "Age Distribution",
+     xlab = "Age",
+     col = "seagreen", border = "black")
+```
+
+### Section 22 ###
+
+```{r}
+table(clinical$Sex)
+par(cex = 0.67)
+barplot(table(clinical$Sex),
+        main = "Sex Distribution",
+        col = c("pink", "lightblue"))
+```
+
+### Section 23 ###
+
+```{r}
+ggplot(subset(clinical, Race.Category != "" & !is.na(Race.Category)),
+       aes(x = Race.Category)) +
+  geom_bar(fill = "seagreen") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7.3),
+    text = element_text(size = 7.3))
+```
+
+### Section 24 ###
+
+```{r}
+par(cex = 0.67)
+barplot(table(clinical$Stage_Grouped),
+        main = "Stage Distribution", las = 2, col = "seagreen")
+```
+
+
+### Section 25 ###
+
+```{r}
+summary(clinical$Overall_Time)
+summary(clinical$DFS_Time)
+summary(clinical$PFS_Time)
+summary(clinical$DSS_Time)
+
+# Select survival time columns
+surv_df <- clinical %>%
+  select(Overall_Time, DFS_Time, PFS_Time, DSS_Time)
+
+# Convert to long format for ggplot
+surv_long <- surv_df %>%
+  pivot_longer(cols = everything(),
+               names_to = "Endpoint",
+               values_to = "Time")
+
+# Boxplot
+ggplot(surv_long, aes(x = Endpoint, y = Time, fill = Endpoint)) +
+  geom_boxplot() +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Distribution of Survival Times",
+    y = "Time (months)",
+    x = ""
+  ) +
+  theme(legend.position = "none")
+```
+
+### Section 26 ###
+
+```{r}
+# Compute mutation frequency per gene
+gene_counts <- rowSums(mut_matrix)
+
+# Select top 10 most mutated genes
+top_genes <- names(sort(gene_counts, decreasing = TRUE))[1:10]
+
+# Subset mutation matrix
+mut_top <- mut_matrix[top_genes, ]
+
+# Match clinical rows to mutation matrix columns
+clinical2 <- clinical[match(colnames(mut_top), clinical$Patient_ID), ]
+
+# Check alignment
+stopifnot(all(clinical2$Patient_ID == colnames(mut_top)))
+
+dist_mat <- dist(t(mut_top), method = "binary")
+hc <- hclust(dist_mat, method = "ward.D2")
+
+plot(hc, labels = FALSE,
+     main = "Clustering Based on Top 10 Mutated Genes")
+
+clusters <- cutree(hc, k = 2)
+clinical2$Mutation_Cluster <- clusters
+```
+
+
+### Section 27 ###
+
+Building contingency tables
+
+```{r}
+clinical2$Sex <- factor(clinical2$Sex)
+
+clinical2$Stage_Grouped <- factor(clinical2$Stage_Grouped,
+                                  levels = c("I", "II", "III", "IV"), ordered = TRUE)
+
+clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
+
+clinical2$Stage_Binary <- ifelse(
+    clinical2$Stage_Grouped %in% c("I", "II"),
+    "Early",
+    "Late"
+)
+
+clinical2$Stage_Binary <- factor(clinical2$Stage_Binary, levels = c("Early", "Late"))
+
+clinical2$Stage_3Group <- dplyr::case_when(
+    clinical2$Stage_Grouped %in% c("I")  ~ "I",
+    clinical2$Stage_Grouped %in% c("II") ~ "II",
+    clinical2$Stage_Grouped %in% c("III", "IV") ~ "III/IV",
+    TRUE ~ NA_character_
+)
+
+clinical2$Stage_3Group <- factor(
+    clinical2$Stage_3Group,
+    levels = c("I", "II", "III/IV")
+)
+
+clinical3 <- clinical2 %>%
+    dplyr::filter(
+        !is.na(Sex),
+        !is.na(Stage_Grouped),
+        !is.na(Stage_Binary),
+        !is.na(Stage_3Group),
+        !is.na(Mutation_Cluster)
+    )
+
+# Sex vs cluster
+table_sex <- table(clinical3$Mutation_Cluster, clinical3$Sex)
+table_sex
+
+# Stage vs cluster
+table_stage <- table(clinical3$Mutation_Cluster, clinical3$Stage_Grouped)
+table_stage
+
+```
+
+
+### Section 28 ###
+
+```{r}
+if (any(table_sex < 5)) {
+    test_sex <- fisher.test(table_sex)
+} else {
+    test_sex <- chisq.test(table_sex)
+}
+test_sex
+prop_sex <- prop.table(table_sex, margin = 1)
+
+barplot(t(prop_sex),
+        beside = TRUE,
+        col = c("#E76F51", "#2A9D8F"),
+        legend = TRUE,
+        xlab = "Mutation Cluster",
+        ylab = "Proportion",
+        main = "Proportion of Sex Within Each Mutation Cluster")
+```
+
+### Section 29 ###
+
+```{r}
+clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
+wilcox_age <- wilcox.test(Diagnosis.Age ~ Mutation_Cluster, data = clinical2)
+wilcox_age
+
+#for visual
+ggplot(clinical3, aes(x = Mutation_Cluster, y = Diagnosis.Age, fill = Mutation_Cluster)) +
+    geom_boxplot() +
+    labs(title = "Age Distribution Across Mutation Clusters",
+         x = "Mutation Cluster", y = "Diagnosis Age") +
+    theme_minimal()
+```
+
+### Section 30 ###
+```{r}
+if (any(table_stage < 5)) {
+    test_stage <- fisher.test(table_stage)
+} else {
+    test_stage <- chisq.test(table_stage)
+}
+test_stage
+
+ggplot(clinical3, aes(x = Mutation_Cluster, fill = Stage_Grouped)) +
+    geom_bar(position = "fill") +
+    labs(title = "Stage Distribution (I, II, III, IV) Across Mutation Clusters",
+         x = "Mutation Cluster", y = "Proportion") +
+    theme_minimal()
+```
+
+### Section 31 ###
+
+Now we are seeing if the clusters have different survival profile. We will construct Kaplan–Meier plot for each OS, DSS, DFS and PFS
+
+```{r}
+#construct only column needed for KM plot
+os_data <- clinical2[, c("Overall_Time", "Overall_Status", "Mutation_Cluster")]
+os_data <- na.omit(os_data)
+
+#fit plot
+fit_os <- survfit(
+  Surv(os_data$Overall_Time, os_data$Overall_Status) ~ Mutation_Cluster,
+  data = os_data
+)
+
+ggsurvplot(fit_os, data = os_data,
+           pval = TRUE, risk.table = FALSE,
+           title = "Overall Survival by Mutation Cluster",
+           legend.title = "Cluster")
+```
+
+### Section 32 ###
+
+```{r}
+dss_data <- clinical2[, c("DSS_Time", "DSS_Status", "Mutation_Cluster")]
+dss_data <- na.omit(dss_data)
+
+fit_dss <- survfit(
+  Surv(DSS_Time, DSS_Status) ~ Mutation_Cluster,
+  data = dss_data
+)
+
+ggsurvplot(fit_dss, data = dss_data,
+           pval = TRUE, risk.table = FALSE,
+           title = "DSS by Mutation Cluster")
+
+```
+
+
+### Section 33 ###
+
+```{r}
+dfs_data <- clinical2[, c("DFS_Time", "DFS_Status", "Mutation_Cluster")]
+dfs_data <- na.omit(dfs_data)
+
+fit_dfs <- survfit(
+  Surv(DFS_Time, DFS_Status) ~ Mutation_Cluster,
+  data = dfs_data
+)
+
+ggsurvplot(fit_dfs, data = dfs_data,
+           pval = TRUE, risk.table = FALSE,
+           title = "DFS by Mutation Cluster")
+```
+
+### Section 34 ###
+
+```{r}
+pfs_data <- clinical2[, c("PFS_Time", "PFS_Status", "Mutation_Cluster")]
+pfs_data <- na.omit(pfs_data)
+
+fit_pfs <- survfit(
+  Surv(PFS_Time, PFS_Status) ~ Mutation_Cluster,
+  data = pfs_data
+)
+
+ggsurvplot(fit_pfs, data = pfs_data,
+           pval = TRUE, risk.table = FALSE,
+           title = "PFS by Mutation Cluster")
+```
+
+### Section 35 ###
+
+We are running adjusted, multivariable Cox regression across multiple survival endpoints to determine whether the mutation-derived clusters have independent prognostic significance.
+
+```{r}
+#Convert variables to factors
+clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
+clinical2$Sex <- factor(clinical2$Sex)
+
+# choose stage variable 
+stage_var <- "Stage_3Group"
+
+#Define all survival endpoints
+surv_endpoints <- list(
+  OS  = c("Overall_Time", "Overall_Status"),
+  DSS = c("DSS_Time",     "DSS_Status"),
+  DFS = c("DFS_Time",     "DFS_Status"),
+  PFS = c("PFS_Time",     "PFS_Status")
+)
+
+cox_results <- list()
+
+for (ep in names(surv_endpoints)) {
+  
+  time_col  <- surv_endpoints[[ep]][1]
+  event_col <- surv_endpoints[[ep]][2]
+  
+  # skip if any endpoint does not exist
+  if (!all(c(time_col, event_col) %in% colnames(clinical2))) {
+    message("Skipping ", ep, " — missing columns.")
+    next
+  }
+  
+  formula_string <- paste0(
+    "Surv(", time_col, ", ", event_col, ") ~ ",
+    "Mutation_Cluster + Diagnosis.Age + Sex + ", stage_var
+  )
+  
+  fit <- coxph(as.formula(formula_string), data = clinical2)
+  cox_results[[ep]] <- fit
+  
+  # optional forest plot
+  print(
+    ggforest(fit, data = clinical2,
+             main = paste0(ep, " – Multivariable Cox Model"))
+  )
+}
+
+```
+
+
+### Section 36 ###
+
+```{r}
+# mut_matrix is gene x patient with 0/1 mutation presence
+# TMB = number of mutated genes per patient
+clinical2$TMB <- colSums(mut_matrix)
+clinical2$logTMB <- log1p(clinical2$TMB)   # handles TMB=0 safely
+
+
+clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
+clinical2$Sex <- factor(clinical2$Sex)
+
+stage_var <- "Stage_3Group"
+
+
+surv_endpoints <- list(
+  OS  = c("Overall_Time", "Overall_Status"),
+  DSS = c("DSS_Time",     "DSS_Status"),
+  DFS = c("DFS_Time",     "DFS_Status"),
+  PFS = c("PFS_Time",     "PFS_Status")
+)
+cox_TMB_results <- list()
+cox_TMB_results_adj <- list()
+
+for (ep in names(surv_endpoints)) {
+  
+  time_col  <- surv_endpoints[[ep]][1]
+  event_col <- surv_endpoints[[ep]][2]
+  
+  # skip if missing columns
+  if (!all(c(time_col, event_col) %in% names(clinical2))) {
+    message("Skipping ", ep, ": missing time/event")
+    next
+  }
+  
+  cat("\n=================================================\n")
+  cat("              TMB Survival Analysis –", ep, "\n")
+  cat("=================================================\n")
+  
+  # -----------------------------
+  # 1. Univariate Cox: TMB only
+  # -----------------------------
+  form_uni <- as.formula(
+    paste0("Surv(", time_col, ", ", event_col, ") ~ logTMB")
+  )
+  
+  fit_uni <- coxph(form_uni, data = clinical2)
+  cox_TMB_results[[ep]] <- fit_uni
+  
+  cat("\n--- Univariate Cox (TMB only) ---\n")
+  print(summary(fit_uni))
+  
+  # -----------------------------
+  # 2. Multivariable Cox: TMB + age + sex + stage
+  # -----------------------------
+  form_multi <- as.formula(
+    paste0("Surv(", time_col, ", ", event_col, ") ~ ",
+           "logTMB + Diagnosis.Age + Sex + ", stage_var)
+  )
+  
+  fit_multi <- coxph(form_multi, data = clinical2)
+  cox_TMB_results_adj[[ep]] <- fit_multi
+  
+  # Optional: forest plot
+  print(
+    ggforest(fit_multi, 
+             data = clinical2,
+             main = paste0(ep, " – TMB Multivariable Cox Model"))
+  )
+}
+
+
+```
+
+
+
 
 
 
