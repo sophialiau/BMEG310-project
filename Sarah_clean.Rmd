@@ -1,8 +1,11 @@
 ---
-title: "Sarah"
-author: "Sarah Dumont"
+title: "Mutation and Clinical Analysis of Liver Hepatocellular Carcinoma Code Base"
+author: "Group 15"
 date: "2025-11-25"
-output: html_document
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
 ---
 
 
@@ -32,7 +35,9 @@ library(survminer)
 
 ```{r setup, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+```
 
+```{r}
 clinical <- read_tsv(
   "data_clinical_patient.txt",
   comment = "#",
