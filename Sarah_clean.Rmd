@@ -12,14 +12,14 @@ output: html_document
 ```{r}
 #loaded Libraries 
 
+library(dplyr)
 library(readr)
 library(tibble)
-library(e1071)
-library(survival)
-library(survminer)
 library(ggplot2)
 library(tidyr)
-library(dplyr)
+library(e1071)
+library(purrr)
+
 ```
 
 
@@ -275,7 +275,7 @@ var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
 cum_var <- cumsum(var_explained)
 
 # 5. Find how many PCs needed for 90% variance
-num_pcs_90 <- which(cum_var >= 0.99)[1]
+num_pcs_90 <- which(cum_var >= 0.90)[1]
 
 num_pcs_90
 
@@ -291,8 +291,7 @@ Question 2: can a model be predicted that can accuratly determine the stage of c
 ```{r}
 stage_col <- "AJCC_PATHOLOGIC_TUMOR_STAGE"
 
-stage_col <- stage_candidates[1]     
-stage_col                             
+                            
 
 clean_stage_to_14 <- function(x) {
   x <- toupper(as.character(x))
@@ -332,8 +331,11 @@ clinical_stage
 
 
 
+
 ```{r}
 
+tmb_df <- tmb_df %>%
+  rename(PATIENT_ID = Patient)
 
 tmb_stage <- tmb_df %>%
   inner_join(clinical_stage, by = "PATIENT_ID")
@@ -440,7 +442,7 @@ gene_diff_tbl <- tibble(
 ) %>%
   arrange(desc(Abs_Diff))        
 
-gene_diff_tbl <- gene_diff_tbl[1:10, ]
+gene_diff_tbl <- gene_diff_tbl[1:20, ]
 
 write.table(gene_diff_tbl, row.names = FALSE, sep = ",")
 
@@ -530,7 +532,6 @@ Additionally, we can now see that DNAH6 appears only in the early-stage group. T
 ### SECTION: 18 ###
 
 ```{r}
-
 clean_stage_to_14 <- function(x) {
   x <- toupper(as.character(x))
   x <- gsub("^STAGE\\s*", "", x)
@@ -558,9 +559,6 @@ clinical_stage <- clinical %>%
   ) %>%
   filter(!is.na(Stage_lowhigh)) %>%
   select(PATIENT_ID, Stage_num, Stage_lowhigh)
-
-
-
 ```
 
 
@@ -572,690 +570,189 @@ clinical_stage <- clinical %>%
 
 
 
+
 ```{r}
+library(dplyr)
+library(e1071)
 
-genes_for_model <- gene_diff_tbl$Gene[1:20]
+genes_for_model <- intersect(gene_diff_tbl$Gene[1:30], rownames(mut_matrix))
 
-genes_for_model <- intersect(genes_for_model, colnames(train))
-train_nb <- train[, c(genes_for_model, "Stage_lowhigh")]
+mut_df <- t(mut_matrix[genes_for_model, , drop = FALSE]) %>%
+  as.data.frame() %>%
+  mutate(PATIENT_ID = rownames(.))
 
-# df must already exist and have:
-# - one column per gene in genes_for_model
-# - PATIENT_ID
-# - Stage_lowhigh (factor with "Low Stage", "High Stage")
+df <- mut_df %>%
+  inner_join(clinical_stage %>% select(PATIENT_ID, Stage_lowhigh),
+             by = "PATIENT_ID") %>%
+  filter(!is.na(Stage_lowhigh))
 
-# ---- function: run Naive Bayes once for a given seed ----
-run_nb_once <- function(seed, df, genes_for_model, threshold = 0.999) {
-  set.seed(seed)
+df$Stage_lowhigh <- factor(df$Stage_lowhigh)
+
+# Prepare results storage
+results <- data.frame(seed = integer(), accuracy = numeric(),
+                      sensitivity = numeric(), specificity = numeric(),
+                      precision = numeric(), stringsAsFactors = FALSE)
+
+threshold <- 0.99
+
+# Run multiple seeds
+for(i in 1:10){   # can increase to 50
+  set.seed(i)
   
-  # stratified split 75/25
-  low  <- df %>% filter(Stage_lowhigh == "Low Stage")
+  # stratified split
+  low <- df %>% filter(Stage_lowhigh == "Low Stage")
   high <- df %>% filter(Stage_lowhigh == "High Stage")
   
-  low_idx  <- sample(seq_len(nrow(low)),  size = floor(0.75 * nrow(low)))
+  # skip if too few patients
+  if(nrow(low) < 2 | nrow(high) < 2) next
+  
+  low_idx <- sample(seq_len(nrow(low)), size = floor(0.75 * nrow(low)))
   high_idx <- sample(seq_len(nrow(high)), size = floor(0.75 * nrow(high)))
   
-  train <- bind_rows(low[low_idx, ],  high[high_idx, ])
+  train <- bind_rows(low[low_idx, ], high[high_idx, ])
   test  <- bind_rows(low[-low_idx, ], high[-high_idx, ])
   
-  # fit NB on selected genes
   train_nb <- train[, c(genes_for_model, "Stage_lowhigh")]
+  
   nb_model <- naiveBayes(Stage_lowhigh ~ ., data = train_nb)
   
-  # predict probabilities
-  nb_prob <- predict(
-    nb_model,
-    newdata = test[, genes_for_model, drop = FALSE],
-    type = "raw"
-  )
+  # Predict probabilities
+  nb_prob <- predict(nb_model, newdata = test[, genes_for_model, drop = FALSE], type = "raw")
   
-  # hard classification with threshold on P(High Stage)
-  nb_pred <- ifelse(nb_prob[, "High Stage"] > threshold,
-                    "High Stage", "Low Stage")
+  # Handle cases where one class is missing
+  if(!"High Stage" %in% colnames(nb_prob)){
+    nb_prob <- cbind(nb_prob, "High Stage" = 0)
+  }
+  
+  nb_pred <- ifelse(nb_prob[, "High Stage"] > threshold, "High Stage", "Low Stage")
   nb_pred <- factor(nb_pred, levels = levels(df$Stage_lowhigh))
   
-  # confusion matrix
   cm <- table(Predicted = nb_pred, Actual = test$Stage_lowhigh)
   
-  # make sure all cells exist
   TP <- cm["High Stage", "High Stage"] %||% 0
   TN <- cm["Low Stage",  "Low Stage"]  %||% 0
   FP <- cm["High Stage", "Low Stage"]  %||% 0
   FN <- cm["Low Stage",  "High Stage"] %||% 0
   
-  accuracy    <- (TP + TN) / (TP + TN + FP + FN)
-  sensitivity <- if ((TP + FN) > 0) TP / (TP + FN) else NA
-  specificity <- if ((TN + FP) > 0) TN / (TN + FP) else NA
-  precision   <- if ((TP + FP) > 0) TP / (TP + FP) else NA
-  F1          <- if (!is.na(precision) && !is.na(sensitivity) &&
-                     (precision + sensitivity) > 0) {
-    2 * precision * sensitivity / (precision + sensitivity)
-  } else {
-    NA
-  }
-  
-  tibble(
-    seed        = seed,
-    accuracy    = accuracy,
-    sensitivity = sensitivity,
-    specificity = specificity,
-    precision   = precision,
-    F1          = F1
-  )
+  results <- rbind(results, data.frame(
+    seed = i,
+    accuracy = (TP + TN)/(TP+TN+FP+FN),
+    sensitivity = if((TP+FN)>0) TP/(TP+FN) else NA,
+    specificity = if((TN+FP)>0) TN/(TN+FP) else NA,
+    precision = if((TP+FP)>0) TP/(TP+FP) else NA
+  ))
 }
 
-# little helper for missing cells in confusion matrix
-`%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
-
-# ---- run over many seeds ----
-seeds <- 1:50   # try 50 different random splits
-
-nb_results <- purrr::map_dfr(
-  seeds,
-  ~run_nb_once(.x, df = df, genes_for_model = genes_for_model, threshold = 0.999)
-)
-
-# look at average + spread of metrics
-summary_stats <- nb_results %>%
-  summarise(
-    across(
-      c(accuracy, sensitivity, specificity, precision, F1),
-      list(mean = mean, sd = sd),
-      na.rm = TRUE
-    )
-  )
-
-nb_results
-summary_stats
+# Average metrics
+colMeans(results[,-1], na.rm = TRUE)
 
 ```
-
-
-Because Naive Bayes tends to produce extremely high or low probabilities on this sparse mutation data, a very high decision threshold (0.999) was used for calling a tumor “High Stage”. This biases the classifier toward catching almost all truly high-stage tumors (sensitivity ≈ 94%), but at the cost of low specificity (≈ 57%) and modest overall accuracy (≈ 46%).
+Because Naive Bayes tends to produce extremely high or low probabilities on this sparse mutation data, a very high decision threshold (0.999) was used for calling a tumor “High Stage”. This biases the classifier toward catching almost all truly high-stage tumors (sensitivity ≈ 94%), but at the cost of low specificity (≈ 32%) and modest overall accuracy (≈ 46%).
 
 
 Could be a valid model because it rarely misses the high 
 
-
 ### SECTION: 20 ###
 
 
-```{r}
 
+```{r}
+library(dplyr)
+library(e1071)
+
+# --------------------------------
+# 1. Gene list for the model
+# --------------------------------
 
 gene_freq <- rowSums(mut_matrix)
-genes_for_model_2 <- names(sort(gene_freq, decreasing = TRUE))[1:20]
+genes_for_model_2 <- names(sort(gene_freq, decreasing = TRUE))[1:30]
 
+# ensure genes exist in mut_matrix
+genes_for_model_2 <- intersect(genes_for_model_2, rownames(mut_matrix))
 
-genes_for_model_2 <- intersect(genes_for_model_2, colnames(train))
-train_nb <- train[, c(genes_for_model_2, "Stage_lowhigh")]
+# --------------------------------
+# 2. Build patient × gene + stage data
+# --------------------------------
 
+mut_df <- t(mut_matrix[genes_for_model_2, , drop = FALSE]) %>%
+  as.data.frame() %>%
+  mutate(PATIENT_ID = rownames(.))
 
-run_nb_once <- function(seed, df, genes_for_model_2, threshold = 0.5) {
-  set.seed(seed)
+df <- mut_df %>%
+  inner_join(
+    clinical_stage %>% select(PATIENT_ID, Stage_lowhigh),
+    by = "PATIENT_ID"
+  ) %>%
+  filter(!is.na(Stage_lowhigh))
+
+df$Stage_lowhigh <- factor(df$Stage_lowhigh)
+
+# --------------------------------
+# 3. Run multiple seeds with stratified splits
+# --------------------------------
+
+threshold <- 0.75
+results <- data.frame(seed = integer(),
+                      accuracy = numeric(),
+                      sensitivity = numeric(),
+                      specificity = numeric(),
+                      precision = numeric(),
+                      stringsAsFactors = FALSE)
+
+`%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
+
+for(i in 1:10){   # change to 50 if desired
+  set.seed(i)
   
-  # stratified split 75/25
-  low  <- df %>% filter(Stage_lowhigh == "Low Stage")
+  low <- df %>% filter(Stage_lowhigh == "Low Stage")
   high <- df %>% filter(Stage_lowhigh == "High Stage")
   
-  low_idx  <- sample(seq_len(nrow(low)),  size = floor(0.75 * nrow(low)))
+  # skip iteration if too few patients in any class
+  if(nrow(low) < 2 | nrow(high) < 2) next
+  
+  low_idx <- sample(seq_len(nrow(low)), size = floor(0.75 * nrow(low)))
   high_idx <- sample(seq_len(nrow(high)), size = floor(0.75 * nrow(high)))
   
-  train <- bind_rows(low[low_idx, ],  high[high_idx, ])
+  train <- bind_rows(low[low_idx, ], high[high_idx, ])
   test  <- bind_rows(low[-low_idx, ], high[-high_idx, ])
   
-  # fit NB on selected genes
   train_nb <- train[, c(genes_for_model_2, "Stage_lowhigh")]
+  
   nb_model <- naiveBayes(Stage_lowhigh ~ ., data = train_nb)
   
-  # predict probabilities
-  nb_prob <- predict(
-    nb_model,
-    newdata = test[, genes_for_model_2, drop = FALSE],
-    type = "raw"
-  )
+  nb_prob <- predict(nb_model, newdata = test[, genes_for_model_2, drop = FALSE], type = "raw")
   
-  # hard classification with threshold on P(High Stage)
-  nb_pred <- ifelse(nb_prob[, "High Stage"] > threshold,
-                    "High Stage", "Low Stage")
+  # handle missing High Stage column
+  if(!"High Stage" %in% colnames(nb_prob)){
+    nb_prob <- cbind(nb_prob, "High Stage" = 0)
+  }
+  
+  nb_pred <- ifelse(nb_prob[, "High Stage"] > threshold, "High Stage", "Low Stage")
   nb_pred <- factor(nb_pred, levels = levels(df$Stage_lowhigh))
   
-  # confusion matrix
   cm <- table(Predicted = nb_pred, Actual = test$Stage_lowhigh)
   
-  # make sure all cells exist
   TP <- cm["High Stage", "High Stage"] %||% 0
   TN <- cm["Low Stage",  "Low Stage"]  %||% 0
   FP <- cm["High Stage", "Low Stage"]  %||% 0
   FN <- cm["Low Stage",  "High Stage"] %||% 0
   
-  accuracy    <- (TP + TN) / (TP + TN + FP + FN)
-  sensitivity <- if ((TP + FN) > 0) TP / (TP + FN) else NA
-  specificity <- if ((TN + FP) > 0) TN / (TN + FP) else NA
-  precision   <- if ((TP + FP) > 0) TP / (TP + FP) else NA
-  F1          <- if (!is.na(precision) && !is.na(sensitivity) &&
-                     (precision + sensitivity) > 0) {
-    2 * precision * sensitivity / (precision + sensitivity)
-  } else {
-    NA
-  }
-  
-  tibble(
-    seed        = seed,
-    accuracy    = accuracy,
-    sensitivity = sensitivity,
-    specificity = specificity,
-    precision   = precision,
-    F1          = F1
-  )
+  results <- rbind(results, data.frame(
+    seed = i,
+    accuracy = (TP + TN)/(TP+TN+FP+FN),
+    sensitivity = if((TP+FN)>0) TP/(TP+FN) else NA,
+    specificity = if((TN+FP)>0) TN/(TN+FP) else NA,
+    precision = if((TP+FP)>0) TP/(TP+FP) else NA
+  ))
 }
 
+# --------------------------------
+# 4. Average metrics across runs
+# --------------------------------
 
-
-# little helper for missing cells in confusion matrix
-`%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
-
-# ---- run over many seeds ----
-seeds <- 1:50   # try 50 different random splits
-
-nb_results <- purrr::map_dfr(
-  seeds,
-  ~run_nb_once(.x, df = df, genes_for_model_2 = genes_for_model_2, threshold = 0.5)
-)
-
-# look at average + spread of metrics
-summary_stats <- nb_results %>%
-  summarise(
-    across(
-      c(accuracy, sensitivity, specificity, precision, F1),
-      list(mean = mean, sd = sd),
-      na.rm = TRUE
-    )
-  )
-
-nb_results
+summary_stats <- colMeans(results[,-1], na.rm = TRUE)
+results
 summary_stats
-```
-
-Investigation 3-5 starts here
-
-```{r}
-clinical <- read.delim("data_clinical_patient.txt", header = TRUE,
-                      sep = "\t", stringsAsFactors = FALSE)
-mutations <- read.delim("data_mutations.txt", header = TRUE,
-                      sep = "\t", stringsAsFactors = FALSE)
-                       
-```
-
-```{r}
-clinical$Patient_ID <- clinical$X.Patient.Identifier
-mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
-
-common_ids <- intersect(clinical$Patient_ID, mutations$Patient_ID)
-clinical <- clinical[clinical$Patient_ID %in% common_ids, ]
-mutations <- mutations[mutations$Patient_ID %in% common_ids, ]
-
-nonsynonymous <- c(
-  "Missense_Mutation", "Nonsense_Mutation",
-  "Frame_Shift_Del", "Frame_Shift_Ins",
-  "In_Frame_Del", "In_Frame_Ins",
-  "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
-  "Translation_Start_Site"
-)
-mut_filt <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
-
-genes <- unique(mut_filt$Hugo_Symbol)
-patients <- unique(mut_filt$Patient_ID)
-
-mut_matrix <- matrix(0, nrow = length(genes), ncol = length(patients))
-rownames(mut_matrix) <- genes
-colnames(mut_matrix) <- patients
-
-for (i in seq_len(nrow(mut_filt))) {
-    g <- mut_filt$Hugo_Symbol[i]
-    p <- mut_filt$Patient_ID[i]
-    mut_matrix[g, p] <- 1
-}
-parse_status <- function(x) {
-    as.numeric(sub(":.*", "", x))
-}
-
-# Convert time strings ("63.72") to numeric
-parse_time <- function(x) {
-    as.numeric(trimws(x))
-}
-
-# Age
-clinical$Diagnosis.Age <- parse_time(clinical$Diagnosis.Age)
-# Survival Times
-clinical$Overall_Time  <- parse_time(clinical$Overall.Survival..Months.)
-clinical$DSS_Time      <- parse_time(clinical$Months.of.disease.specific.survival)
-clinical$DFS_Time      <- parse_time(clinical$Disease.Free..Months.)
-clinical$PFS_Time      <- parse_time(clinical$Progress.Free.Survival..Months.)
-# Survival Status
-clinical$Overall_Status <- parse_status(clinical$Overall.Survival.Status)
-clinical$DSS_Status     <- parse_status(clinical$Disease.specific.Survival.status)
-clinical$DFS_Status     <- parse_status(clinical$Disease.Free.Status)
-clinical$PFS_Status     <- parse_status(clinical$Progression.Free.Status)
-
-tmb <- colSums(mut_matrix)
-hist(tmb, breaks = 30, col = "seagreen", border = "black",
-     main = "TMB Distribution",
-     xlab = "Tumor Mutation Burden (# mutated genes)")
-
-# Create grouped clinical stage
-clinical$Stage_Grouped <- clinical$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code  # start with original
-
-clinical$Stage_Grouped <- ifelse(grepl("^STAGE I$", clinical$Stage), "I",
-                          ifelse(grepl("^STAGE II$", clinical$Stage), "II",
-                          ifelse(grepl("^STAGE III", clinical$Stage), "III",
-                          ifelse(grepl("^STAGE IV", clinical$Stage), "IV",
-                                 NA))))
-clinical_NAStage <- clinical[!is.na(clinical$Stage_Grouped), ]
-```
-
-
-
-### Section 21 ###
-
-```{r}
-age_data <- clinical[!is.na(clinical$Diagnosis.Age), ]
-par(cex = 0.67)
-hist(age_data$Diagnosis.Age,
-     main = "Age Distribution",
-     xlab = "Age",
-     col = "seagreen", border = "black")
-```
-
-### Section 22 ###
-
-```{r}
-table(clinical$Sex)
-par(cex = 0.67)
-barplot(table(clinical$Sex),
-        main = "Sex Distribution",
-        col = c("pink", "lightblue"))
-```
-
-### Section 23 ###
-
-```{r}
-ggplot(subset(clinical, Race.Category != "" & !is.na(Race.Category)),
-       aes(x = Race.Category)) +
-  geom_bar(fill = "seagreen") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7.3),
-    text = element_text(size = 7.3))
-```
-
-### Section 24 ###
-
-```{r}
-par(cex = 0.67)
-barplot(table(clinical$Stage_Grouped),
-        main = "Stage Distribution", las = 2, col = "seagreen")
-```
-
-
-### Section 25 ###
-
-```{r}
-summary(clinical$Overall_Time)
-summary(clinical$DFS_Time)
-summary(clinical$PFS_Time)
-summary(clinical$DSS_Time)
-
-# Select survival time columns
-surv_df <- clinical %>%
-  select(Overall_Time, DFS_Time, PFS_Time, DSS_Time)
-
-# Convert to long format for ggplot
-surv_long <- surv_df %>%
-  pivot_longer(cols = everything(),
-               names_to = "Endpoint",
-               values_to = "Time")
-
-# Boxplot
-ggplot(surv_long, aes(x = Endpoint, y = Time, fill = Endpoint)) +
-  geom_boxplot() +
-  theme_minimal(base_size = 14) +
-  labs(
-    title = "Distribution of Survival Times",
-    y = "Time (months)",
-    x = ""
-  ) +
-  theme(legend.position = "none")
-```
-
-### Section 26 ###
-
-```{r}
-# Compute mutation frequency per gene
-gene_counts <- rowSums(mut_matrix)
-
-# Select top 10 most mutated genes
-top_genes <- names(sort(gene_counts, decreasing = TRUE))[1:10]
-
-# Subset mutation matrix
-mut_top <- mut_matrix[top_genes, ]
-
-# Match clinical rows to mutation matrix columns
-clinical2 <- clinical[match(colnames(mut_top), clinical$Patient_ID), ]
-
-# Check alignment
-stopifnot(all(clinical2$Patient_ID == colnames(mut_top)))
-
-dist_mat <- dist(t(mut_top), method = "binary")
-hc <- hclust(dist_mat, method = "ward.D2")
-
-plot(hc, labels = FALSE,
-     main = "Clustering Based on Top 10 Mutated Genes")
-
-clusters <- cutree(hc, k = 2)
-clinical2$Mutation_Cluster <- clusters
-```
-
-
-### Section 27 ###
-
-Building contingency tables
-
-```{r}
-clinical2$Sex <- factor(clinical2$Sex)
-
-clinical2$Stage_Grouped <- factor(clinical2$Stage_Grouped,
-                                  levels = c("I", "II", "III", "IV"), ordered = TRUE)
-
-clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
-
-clinical2$Stage_Binary <- ifelse(
-    clinical2$Stage_Grouped %in% c("I", "II"),
-    "Early",
-    "Late"
-)
-
-clinical2$Stage_Binary <- factor(clinical2$Stage_Binary, levels = c("Early", "Late"))
-
-clinical2$Stage_3Group <- dplyr::case_when(
-    clinical2$Stage_Grouped %in% c("I")  ~ "I",
-    clinical2$Stage_Grouped %in% c("II") ~ "II",
-    clinical2$Stage_Grouped %in% c("III", "IV") ~ "III/IV",
-    TRUE ~ NA_character_
-)
-
-clinical2$Stage_3Group <- factor(
-    clinical2$Stage_3Group,
-    levels = c("I", "II", "III/IV")
-)
-
-clinical3 <- clinical2 %>%
-    dplyr::filter(
-        !is.na(Sex),
-        !is.na(Stage_Grouped),
-        !is.na(Stage_Binary),
-        !is.na(Stage_3Group),
-        !is.na(Mutation_Cluster)
-    )
-
-# Sex vs cluster
-table_sex <- table(clinical3$Mutation_Cluster, clinical3$Sex)
-table_sex
-
-# Stage vs cluster
-table_stage <- table(clinical3$Mutation_Cluster, clinical3$Stage_Grouped)
-table_stage
 
 ```
-
-
-### Section 28 ###
-
-```{r}
-if (any(table_sex < 5)) {
-    test_sex <- fisher.test(table_sex)
-} else {
-    test_sex <- chisq.test(table_sex)
-}
-test_sex
-prop_sex <- prop.table(table_sex, margin = 1)
-
-barplot(t(prop_sex),
-        beside = TRUE,
-        col = c("#E76F51", "#2A9D8F"),
-        legend = TRUE,
-        xlab = "Mutation Cluster",
-        ylab = "Proportion",
-        main = "Proportion of Sex Within Each Mutation Cluster")
-```
-
-### Section 29 ###
-
-```{r}
-clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
-wilcox_age <- wilcox.test(Diagnosis.Age ~ Mutation_Cluster, data = clinical2)
-wilcox_age
-
-#for visual
-ggplot(clinical3, aes(x = Mutation_Cluster, y = Diagnosis.Age, fill = Mutation_Cluster)) +
-    geom_boxplot() +
-    labs(title = "Age Distribution Across Mutation Clusters",
-         x = "Mutation Cluster", y = "Diagnosis Age") +
-    theme_minimal()
-```
-
-### Section 30 ###
-```{r}
-if (any(table_stage < 5)) {
-    test_stage <- fisher.test(table_stage)
-} else {
-    test_stage <- chisq.test(table_stage)
-}
-test_stage
-
-ggplot(clinical3, aes(x = Mutation_Cluster, fill = Stage_Grouped)) +
-    geom_bar(position = "fill") +
-    labs(title = "Stage Distribution (I, II, III, IV) Across Mutation Clusters",
-         x = "Mutation Cluster", y = "Proportion") +
-    theme_minimal()
-```
-
-### Section 31 ###
-
-Now we are seeing if the clusters have different survival profile. We will construct Kaplan–Meier plot for each OS, DSS, DFS and PFS
-
-```{r}
-#construct only column needed for KM plot
-os_data <- clinical2[, c("Overall_Time", "Overall_Status", "Mutation_Cluster")]
-os_data <- na.omit(os_data)
-
-#fit plot
-fit_os <- survfit(
-  Surv(os_data$Overall_Time, os_data$Overall_Status) ~ Mutation_Cluster,
-  data = os_data
-)
-
-ggsurvplot(fit_os, data = os_data,
-           pval = TRUE, risk.table = FALSE,
-           title = "Overall Survival by Mutation Cluster",
-           legend.title = "Cluster")
-```
-
-### Section 32 ###
-
-```{r}
-dss_data <- clinical2[, c("DSS_Time", "DSS_Status", "Mutation_Cluster")]
-dss_data <- na.omit(dss_data)
-
-fit_dss <- survfit(
-  Surv(DSS_Time, DSS_Status) ~ Mutation_Cluster,
-  data = dss_data
-)
-
-ggsurvplot(fit_dss, data = dss_data,
-           pval = TRUE, risk.table = FALSE,
-           title = "DSS by Mutation Cluster")
-
-```
-
-
-### Section 33 ###
-
-```{r}
-dfs_data <- clinical2[, c("DFS_Time", "DFS_Status", "Mutation_Cluster")]
-dfs_data <- na.omit(dfs_data)
-
-fit_dfs <- survfit(
-  Surv(DFS_Time, DFS_Status) ~ Mutation_Cluster,
-  data = dfs_data
-)
-
-ggsurvplot(fit_dfs, data = dfs_data,
-           pval = TRUE, risk.table = FALSE,
-           title = "DFS by Mutation Cluster")
-```
-
-### Section 34 ###
-
-```{r}
-pfs_data <- clinical2[, c("PFS_Time", "PFS_Status", "Mutation_Cluster")]
-pfs_data <- na.omit(pfs_data)
-
-fit_pfs <- survfit(
-  Surv(PFS_Time, PFS_Status) ~ Mutation_Cluster,
-  data = pfs_data
-)
-
-ggsurvplot(fit_pfs, data = pfs_data,
-           pval = TRUE, risk.table = FALSE,
-           title = "PFS by Mutation Cluster")
-```
-
-### Section 35 ###
-
-We are running adjusted, multivariable Cox regression across multiple survival endpoints to determine whether the mutation-derived clusters have independent prognostic significance.
-
-```{r}
-#Convert variables to factors
-clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
-clinical2$Sex <- factor(clinical2$Sex)
-
-# choose stage variable 
-stage_var <- "Stage_3Group"
-
-#Define all survival endpoints
-surv_endpoints <- list(
-  OS  = c("Overall_Time", "Overall_Status"),
-  DSS = c("DSS_Time",     "DSS_Status"),
-  DFS = c("DFS_Time",     "DFS_Status"),
-  PFS = c("PFS_Time",     "PFS_Status")
-)
-
-cox_results <- list()
-
-for (ep in names(surv_endpoints)) {
-  
-  time_col  <- surv_endpoints[[ep]][1]
-  event_col <- surv_endpoints[[ep]][2]
-  
-  # skip if any endpoint does not exist
-  if (!all(c(time_col, event_col) %in% colnames(clinical2))) {
-    message("Skipping ", ep, " — missing columns.")
-    next
-  }
-  
-  formula_string <- paste0(
-    "Surv(", time_col, ", ", event_col, ") ~ ",
-    "Mutation_Cluster + Diagnosis.Age + Sex + ", stage_var
-  )
-  
-  fit <- coxph(as.formula(formula_string), data = clinical2)
-  cox_results[[ep]] <- fit
-  
-  # optional forest plot
-  print(
-    ggforest(fit, data = clinical2,
-             main = paste0(ep, " – Multivariable Cox Model"))
-  )
-}
-
-```
-
-
-### Section 36 ###
-
-```{r}
-# mut_matrix is gene x patient with 0/1 mutation presence
-# TMB = number of mutated genes per patient
-clinical2$TMB <- colSums(mut_matrix)
-clinical2$logTMB <- log1p(clinical2$TMB)   # handles TMB=0 safely
-
-
-clinical2$Mutation_Cluster <- factor(clinical2$Mutation_Cluster)
-clinical2$Sex <- factor(clinical2$Sex)
-
-stage_var <- "Stage_3Group"
-
-
-surv_endpoints <- list(
-  OS  = c("Overall_Time", "Overall_Status"),
-  DSS = c("DSS_Time",     "DSS_Status"),
-  DFS = c("DFS_Time",     "DFS_Status"),
-  PFS = c("PFS_Time",     "PFS_Status")
-)
-cox_TMB_results <- list()
-cox_TMB_results_adj <- list()
-
-for (ep in names(surv_endpoints)) {
-  
-  time_col  <- surv_endpoints[[ep]][1]
-  event_col <- surv_endpoints[[ep]][2]
-  
-  # skip if missing columns
-  if (!all(c(time_col, event_col) %in% names(clinical2))) {
-    message("Skipping ", ep, ": missing time/event")
-    next
-  }
-  
-  cat("\n=================================================\n")
-  cat("              TMB Survival Analysis –", ep, "\n")
-  cat("=================================================\n")
-  
-  # -----------------------------
-  # 1. Univariate Cox: TMB only
-  # -----------------------------
-  form_uni <- as.formula(
-    paste0("Surv(", time_col, ", ", event_col, ") ~ logTMB")
-  )
-  
-  fit_uni <- coxph(form_uni, data = clinical2)
-  cox_TMB_results[[ep]] <- fit_uni
-  
-  cat("\n--- Univariate Cox (TMB only) ---\n")
-  print(summary(fit_uni))
-  
-  # -----------------------------
-  # 2. Multivariable Cox: TMB + age + sex + stage
-  # -----------------------------
-  form_multi <- as.formula(
-    paste0("Surv(", time_col, ", ", event_col, ") ~ ",
-           "logTMB + Diagnosis.Age + Sex + ", stage_var)
-  )
-  
-  fit_multi <- coxph(form_multi, data = clinical2)
-  cox_TMB_results_adj[[ep]] <- fit_multi
-  
-  # Optional: forest plot
-  print(
-    ggforest(fit_multi, 
-             data = clinical2,
-             main = paste0(ep, " – TMB Multivariable Cox Model"))
-  )
-}
-
-
-```
-
-
-
-
-
 
