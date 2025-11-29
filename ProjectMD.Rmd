@@ -585,13 +585,357 @@ for (ep in names(surv_endpoints)) {
 ```
 
 
+```{r}
+rnaseq <- read.csv("RNAseq_LIHC.csv", header = TRUE, 
+                   stringsAsFactors = FALSE)
+colnames(rnaseq)[1:10]
+
+```
+
+##Section 1
+
+Patient ID standardization
+
+```{r}
+# Store the gene column separately
+genes <- rnaseq[, 1]
+
+# Extract original patient columns
+patient_cols <- colnames(rnaseq)[-1]
+
+# Step 1: Replace "." with "-"
+patient_cols2 <- gsub("\\.", "-", patient_cols)
+
+# Step 2: Extract the first 3 barcode components: TCGA-XX-YYYY
+# TCGA-AB-1234-... → TCGA-AB-1234
+patient_ids <- sapply(patient_cols2, function(x) {
+  parts <- strsplit(x, "-")[[1]]
+  paste(parts[1:3], collapse = "-")
+})
+
+# Update column names in rnaseq
+colnames(rnaseq) <- c("Gene", patient_ids)
+
+# Restore gene column
+rnaseq$Gene <- genes
+
+# View standardized column names
+head(colnames(rnaseq))
+```
+
+##Section 2
+
+Convert to Matrix & Remove Low-Expressed Genes Keep genes with > 10 counts in > 20% of samples.
+
+```{r}
+# Convert to matrix
+count_mat <- rnaseq[, -1]
+row.names(count_mat) <- rnaseq$Gene
+count_mat <- as.matrix(count_mat)
+
+# Filter low-expressed genes
+min_samples <- round(0.2 * ncol(count_mat))
+
+keep <- rowSums(count_mat >= 10) >= min_samples
+count_mat_filt <- count_mat[keep, ]
+
+cat("Genes before filtering:", nrow(count_mat), "\n")
+cat("Genes after filtering:", nrow(count_mat_filt), "\n")
+```
 
 
-## 3. Results
+##Section 3
 
-Should provide an itemized list of investigations and analysis you have performed, along with the findings of such an analysis. Every result or claim needs to be backed up by R markdown code as well as accompanying outputs and figures/flowcharts. Organize every investigation into a sub-section in the results section. You would need to include at least 5 investigations in the results section. The quality (rather than quantity) of the analysis will be key in grading.
+DESeq2 normalized counts
 
-## 4. Challenges
+```{r}
+library(DESeq2)
+# Create dummy metadata (DESeq2 requires it)
+sample_info <- data.frame(row.names = colnames(count_mat_filt),
+                          condition = rep("LIHC", ncol(count_mat_filt)))
 
-Use this section to address any difficulties you are encountering, or expect you will encounter as you make progress with the project. This may include limitations of a current approach or a lack of meaningful results. Please explain why you believe this problem is occurring, and highlight any limitations in your data you have found.
+dds <- DESeqDataSetFromMatrix(countData = count_mat_filt,
+                              colData = sample_info,
+                              design = ~ 1)
+
+# Standard DESeq2 normalization
+dds <- estimateSizeFactors(dds)
+norm_counts <- counts(dds, normalized = TRUE)
+
+# VST transform for PCA & clustering
+vsd <- vst(dds, blind = TRUE)
+vst_mat <- assay(vsd)
+```
+
+
+##Section 4
+
+Global expression exploration
+
+```{r}
+# PCA using top 500 highly variable genes (optional)
+hvg <- order(rowVars(vst_mat), decreasing = TRUE)[1:500]
+pca <- prcomp(t(vst_mat[hvg, ]))
+
+pca_df <- data.frame(
+  PC1 = pca$x[,1],
+  PC2 = pca$x[,2],
+  Sample = rownames(pca$x)
+)
+
+ggplot(pca_df, aes(PC1, PC2)) +
+  geom_point(size = 2) +
+  labs(title = "PCA of LIHC RNA-seq (Top 500 HVGs)",
+       x = paste0("PC1 (", round(summary(pca)$importance[2,1] * 100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca)$importance[2,2] * 100, 1), "%)"))
+```
+
+##Section 5
+
+Distance Heatmap
+```{r}
+sample_dist <- dist(t(vst_mat))
+sample_dist_mat <- as.matrix(sample_dist)
+
+pheatmap(sample_dist_mat,
+         clustering_method = "ward.D2",
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         main = "Sample Distance Heatmap (VST Expression)")
+```
+
+
+##Section 6
+
+Clustering
+
+```{r}
+library(matrixStats)
+library(pheatmap)
+library(ggplot2)
+
+var_genes <- rowVars(vst_mat)
+hvg_index <- order(var_genes, decreasing = TRUE)[1:1000]
+hvg_mat <- vst_mat[hvg_index, ]
+
+
+# Distance matrix across samples
+dist_samples <- dist(t(hvg_mat))  
+
+# Hierarchical clustering
+hc <- hclust(dist_samples, method = "ward.D2")
+
+# Plot dendrogram
+plot(hc, labels = FALSE, main = "Hierarchical Clustering of LIHC (Top 1000 HVGs)")
+
+k <- 4   # you can change this to 3 or 4
+clusters <- cutree(hc, k = k)
+
+# Assign cluster labels
+Expression_Cluster <- as.factor(clusters)
+names(Expression_Cluster) <- colnames(hvg_mat)
+
+table(Expression_Cluster)
+```
+This helps visualize whether the clusters are well-separated.
+
+```{r}
+pheatmap(hvg_mat,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         clustering_method = "ward.D2",
+         annotation_col = data.frame(Cluster = Expression_Cluster),
+         main = "Heatmap of Top 1000 HVGs (LIHC)")
+
+# PCA on HVGs
+pca_hvg <- prcomp(t(hvg_mat))
+
+pca_df <- data.frame(
+  PC1 = pca_hvg$x[,1],
+  PC2 = pca_hvg$x[,2],
+  Cluster = Expression_Cluster
+)
+
+ggplot(pca_df, aes(PC1, PC2, color = Cluster)) +
+  geom_point(size = 2) +
+  labs(title = "PCA of LIHC RNA-seq (Top 1000 HVGs)",
+       x = paste0("PC1 (", round(summary(pca_hvg)$importance[2,1] * 100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_hvg)$importance[2,2] * 100, 1), "%)")) +
+  theme_minimal() +
+  scale_color_brewer(palette = "Dark2")
+```
+##Section 7
+
+Merge expression clusters with clinical data (handle missing patients)
+
+```{r}
+library(dplyr)
+
+## Expression_Cluster should already exist from Investigation 2
+## names(Expression_Cluster) are patient IDs like "TCGA-2Y-A95S"
+
+expr_cluster_df <- data.frame(
+  Patient_ID        = names(Expression_Cluster),
+  Expression_Cluster = as.factor(as.character(Expression_Cluster)),
+  stringsAsFactors  = FALSE
+)
+
+# Intersect ONLY patients that have both clinical info and expression clusters
+common_ids_expr <- intersect(clinical$Patient_ID, expr_cluster_df$Patient_ID)
+
+clinical_expr <- clinical[clinical$Patient_ID %in% common_ids_expr, ]
+clinical_expr$Stage <- clinical_expr$Neoplasm.Disease.Stage.American.Joint.Committee.on.Cancer.Code
+expr_cluster_df <- expr_cluster_df[expr_cluster_df$Patient_ID %in% common_ids_expr, ]
+
+# Align orders
+clinical_expr <- clinical_expr[match(expr_cluster_df$Patient_ID, clinical_expr$Patient_ID), ]
+stopifnot(all(clinical_expr$Patient_ID == expr_cluster_df$Patient_ID))
+
+# Attach cluster info
+clinical_expr$Expression_Cluster <- expr_cluster_df$Expression_Cluster
+
+cat("N clinical (after clin+mut filter):", nrow(clinical), "\n")
+cat("N expression clusters:", length(Expression_Cluster), "\n")
+cat("N with BOTH clinical + expression:", nrow(clinical_expr), "\n")
+table(clinical_expr$Expression_Cluster)
+```
+
+##Section 8
+
+Cluster vs clinical
+
+```{r}
+clinical_expr$Stage_Grouped <- ifelse(grepl("^STAGE I$",   clinical_expr$Stage), "I",
+                               ifelse(grepl("^STAGE II$",  clinical_expr$Stage), "II",
+                               ifelse(grepl("^STAGE III", clinical_expr$Stage), "III",
+                               ifelse(grepl("^STAGE IV",  clinical_expr$Stage), "IV",
+                                      NA))))
+
+clinical_expr$Stage_Grouped <- factor(clinical_expr$Stage_Grouped,
+                                      levels = c("I", "II", "III", "IV"),
+                                      ordered = TRUE)
+
+clinical_expr <- clinical_expr %>%
+  mutate(
+    Sex               = factor(Sex),
+    Expression_Cluster = factor(Expression_Cluster)
+  )
+
+## Age vs cluster (Kruskal–Wallis)
+boxplot(Diagnosis.Age ~ Expression_Cluster, data = clinical_expr,
+        main = "Age by Expression Cluster",
+        xlab = "Expression Cluster", ylab = "Diagnosis Age (years)")
+kruskal.test(Diagnosis.Age ~ Expression_Cluster, data = clinical_expr)
+
+## Sex vs cluster (χ² or Fisher)
+tab_sex_expr <- table(clinical_expr$Expression_Cluster, clinical_expr$Sex)
+tab_sex_expr
+
+if (any(tab_sex_expr < 5)) {
+  test_sex_expr <- fisher.test(tab_sex_expr)
+} else {
+  test_sex_expr <- chisq.test(tab_sex_expr)
+}
+test_sex_expr
+
+## Stage vs cluster (Stage_3Group for power)
+tab_stage_expr <- table(clinical_expr$Expression_Cluster, clinical_expr$Stage_Grouped)
+tab_stage_expr
+
+chisq.test(tab_stage_expr)
+```
+
+
+## Section 9
+
+Survival analysis by cluster
+
+```{r}
+library(survival)
+library(survminer)
+
+# Make sure survival variables are numeric
+surv_vars_time <- c("Overall_Time", "DSS_Time", "DFS_Time", "PFS_Time")
+surv_vars_stat <- c("Overall_Status", "DSS_Status", "DFS_Status", "PFS_Status")
+
+clinical_expr[surv_vars_time] <- lapply(clinical_expr[surv_vars_time], as.numeric)
+clinical_expr[surv_vars_stat] <- lapply(clinical_expr[surv_vars_stat], as.numeric)
+
+# Helper: run KM for each endpoint
+surv_endpoints <- list(
+  OS  = c("Overall_Time", "Overall_Status"),
+  DSS = c("DSS_Time",     "DSS_Status"),
+  DFS = c("DFS_Time",     "DFS_Status"),
+  PFS = c("PFS_Time",     "PFS_Status")
+)
+
+for (ep in names(surv_endpoints)) {
+  time_var <- surv_endpoints[[ep]][1]
+  stat_var <- surv_endpoints[[ep]][2]
+  
+  data_ep <- clinical_expr %>%
+    filter(!is.na(.data[[time_var]]),
+           !is.na(.data[[stat_var]]))
+  
+  if (nrow(data_ep) == 0) next
+  
+  surv_obj <- Surv(time = data_ep[[time_var]],
+                   event = data_ep[[stat_var]])
+  
+  fit <- survfit(surv_obj ~ Expression_Cluster, data = data_ep)
+  
+  print(
+    ggsurvplot(
+      fit,
+      data       = data_ep,
+      risk.table = TRUE,
+      pval       = TRUE,
+      conf.int   = FALSE,
+      legend.title = "Cluster",
+      xlab       = "Time (months)",
+      ylab       = paste(ep, "survival probability"),
+      title      = paste(ep, "by expression-defined cluster")
+    )
+  )
+}
+```
+
+
+##Section 9 
+
+Cox Models
+```{r}
+# Filter to complete cases for covariates
+clin_OS <- clinical_expr %>%
+  filter(!is.na(Overall_Time),
+         !is.na(Overall_Status),
+         !is.na(Diagnosis.Age),
+         !is.na(Sex),
+         !is.na(Stage_Grouped))
+
+# Unadjusted: cluster only
+cox_OS_unadj <- coxph(
+  Surv(Overall_Time, Overall_Status) ~ Expression_Cluster,
+  data = clin_OS
+)
+summary(cox_OS_unadj)   # HRs & p-values for each cluster
+
+# Adjusted: cluster + age + sex + stage
+cox_OS_adj <- coxph(
+  Surv(Overall_Time, Overall_Status) ~ Expression_Cluster +
+    Diagnosis.Age + Sex + Stage_Grouped,
+  data = clin_OS
+)
+summary(cox_OS_adj)
+```
+
+
+
+
+
+
+
+
+
+
 
