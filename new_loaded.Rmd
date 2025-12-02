@@ -1,0 +1,89 @@
+---
+title: "Part_2"
+author: "Sarah Dumont"
+date: "2025-12-02"
+output: html_document
+---
+
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(readr)
+library(tibble)
+library(ggplot2)
+
+clinical <- read_tsv(
+  "data_clinical_patient.txt",
+  comment = "#",
+  show_col_types = FALSE
+)
+
+
+
+expr <- read.csv("RNAseq_LIHC.csv", stringsAsFactors = FALSE)
+colnames(expr)[1] <- "Gene"   # rename first column from 'X' → Gene
+
+cat("\nExpression matrix preview:\n")
+print(head(expr[,1:6]))
+
+# =========================================
+# 3. NORMALIZE SAMPLE IDS
+#    (convert TCGA.xx.xx → TCGA-xx-xx)
+# =========================================
+
+normalize_tcga <- function(x) {
+  x <- as.character(x)
+  x <- gsub("\\.", "-", x)
+  substr(x, 1, 12)
+}
+
+expr_sample_ids <- colnames(expr)[-1]
+expr_sample_ids_norm <- normalize_tcga(expr_sample_ids)
+
+colnames(expr)[-1] <- expr_sample_ids_norm
+
+# Normalize clinical IDs
+clinical <- clinical %>% 
+  mutate(PATIENT_ID = normalize_tcga(PATIENT_ID))
+
+
+
+common_ids <- intersect(
+  clinical$PATIENT_ID,
+  colnames(expr)[-1]
+)
+
+cat("\nNumber of matched patients:", length(common_ids), "\n")
+
+# Filter clinical to matched samples
+clinical_matched <- clinical %>%
+  filter(PATIENT_ID %in% common_ids)
+
+# Filter expression matrix to matched samples
+expr_matched <- expr %>%
+  select(Gene, all_of(common_ids))
+
+
+gene_names <- expr_matched$Gene
+expr_matrix <- as.matrix(expr_matched[,-1])
+rownames(expr_matrix) <- gene_names
+
+# Ensure numeric (RNA-seq sometimes loads as character)
+expr_matrix <- apply(expr_matrix, 2, as.numeric)
+
+
+
+gene_var <- apply(expr_matrix, 1, var)
+top_n <- 500  # number of highly variable genes to keep
+top_genes <- names(sort(gene_var, decreasing = TRUE))[1:top_n]
+
+expr_hvg <- expr_matrix[top_genes, ]
+
+
+
+
+
+```
+
