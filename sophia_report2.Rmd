@@ -3,3 +3,105 @@ title: "sophia_report2"
 output: html_document
 ---
 
+### SECTION 1: Libraries ### 
+
+
+```{r}
+#loaded Libraries 
+
+library(dplyr)
+library(readr)
+library(tibble)
+library(ggplot2)
+library(tidyr)
+library(e1071)
+library(purrr)
+library(survival)
+library(survminer)
+library(DESeq2)
+library(pheatmap)
+
+library(pheatmap)
+```
+
+
+
+### SECTION 2: Loading Data ###
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Loading in our Expression Data
+expr_raw <- read.csv(
+  "RNAseq_LIHC.csv",
+  header = TRUE,
+  row.names = 1,          # gene IDs become rownames
+  check.names = FALSE     # keep TCGA IDs untouched
+)
+
+dim(expr_raw)
+expr_raw[1:5, 1:5]
+
+# Make expression matrix numeric
+expr_mat <- as.matrix(expr_raw)
+mode(expr_mat) <- "numeric"
+
+# Loading in our Clinical Data
+clinical <- read_tsv(
+  "data_clinical_patient.txt",
+  comment = "#",
+  show_col_types = FALSE
+)
+
+head(clinical)
+
+clinical <- as.data.frame(clinical)
+
+rownames(clinical) <- clinical$PATIENT_ID
+
+# Keeping only matching patient barcodes
+colnames(expr_mat) <- substr(colnames(expr_mat), 1, 12)
+
+common_ids <- intersect(colnames(expr_mat), rownames(clinical))
+length(common_ids)
+
+expr_filt    <- expr_mat[, common_ids]
+clinical_filt <- clinical[common_ids, ]
+
+# Check they are aligned
+stopifnot(all(colnames(expr_filt) == rownames(clinical_filt)))
+
+dim(expr_filt)
+dim(clinical_filt)
+```
+### SECTION 3: Normalization ###
+
+```{r}
+# Building DESeqDataSet using filtered & matched data
+dds <- DESeqDataSetFromMatrix(
+  countData = expr_filt,      # <- use expr_filt
+  colData   = clinical_filt,  # <- use clinical_filt
+  design    = ~ 1             # no specific design yet
+)
+
+# Keeping only genes with 10 or more counts
+keep <- rowSums(counts(dds)) >= 10
+dds  <- dds[keep, ]
+
+# Normalized counts
+dds <- estimateSizeFactors(dds)
+norm_counts <- counts(dds, normalized = TRUE)
+
+# Variance stabilized transform (for downstream analysis such as clustering)
+vsd <- vst(dds, blind = TRUE)
+expr_vst <- assay(vsd)
+
+dim(expr_vst)
+expr_vst[1:5, 1:5]
+
+# random note for commit sake
+
+```
+
