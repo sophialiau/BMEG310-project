@@ -1,19 +1,70 @@
 ---
-title: "Part_2"
-author: "Sarah Dumont"
-date: "2025-12-02"
+title: "setup for everyones report"
 output: html_document
 ---
 
+### SECTION 1: Libraries
+
+
+# ```{r}
+# #may need to do this to load some libaries
+#
+#
+# if (!requireNamespace("BiocManager", quietly = TRUE)) {
+#   install.packages("BiocManager")
+# }
+#
+# # Install the human annotation database
+# BiocManager::install("org.Hs.eg.db", ask = FALSE)
+#
+# # Then load the packages
+# library(AnnotationDbi)
+# library(org.Hs.eg.db)
+#
+# ```
 
 ```{r}
-knitr::opts_chunk$set(echo = TRUE)
+#loaded Libraries 
 
 library(dplyr)
 library(readr)
 library(tibble)
 library(ggplot2)
+library(tidyr)
+library(e1071)
+library(purrr)
+library(survival)
+library(survminer)
 
+
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+library(DESeq2)
+library(pheatmap)
+
+library(pheatmap)
+```
+
+### SECTION 2: Loading Data
+
+```{r}
+# Loading in our Expression Data
+expr_raw <- read.csv(
+  "RNAseq_LIHC.csv",
+  header = TRUE,
+  row.names = 1,          # gene IDs become rownames
+  check.names = FALSE     # keep TCGA IDs untouched
+)
+
+dim(expr_raw)
+expr_raw[1:5, 1:5]
+
+# Make expression matrix numeric
+expr_mat <- as.matrix(expr_raw)
+mode(expr_mat) <- "numeric"
+
+# Loading in our Clinical Data
 clinical <- read_tsv(
   "data_clinical_patient.txt",
   comment = "#",
@@ -22,68 +73,123 @@ clinical <- read_tsv(
 
 
 
-expr <- read.csv("RNAseq_LIHC.csv", stringsAsFactors = FALSE)
-colnames(expr)[1] <- "Gene"   # rename first column from 'X' → Gene
+clinical <- as.data.frame(clinical)
 
-cat("\nExpression matrix preview:\n")
-print(head(expr[,1:6]))
+rownames(clinical) <- clinical$PATIENT_ID
 
-# =========================================
-# 3. NORMALIZE SAMPLE IDS
-#    (convert TCGA.xx.xx → TCGA-xx-xx)
-# =========================================
+# Keeping only matching patient barcodes
+colnames(expr_mat) <- substr(colnames(expr_mat), 1, 12)
 
-normalize_tcga <- function(x) {
-  x <- as.character(x)
-  x <- gsub("\\.", "-", x)
-  substr(x, 1, 12)
-}
+common_ids <- intersect(colnames(expr_mat), rownames(clinical))
+length(common_ids)
 
-expr_sample_ids <- colnames(expr)[-1]
-expr_sample_ids_norm <- normalize_tcga(expr_sample_ids)
+expr_filt    <- expr_mat[, common_ids]
+clinical_filt <- clinical[common_ids, ]
 
-colnames(expr)[-1] <- expr_sample_ids_norm
+# Check they are aligned
+stopifnot(all(colnames(expr_filt) == rownames(clinical_filt)))
 
-# Normalize clinical IDs
-clinical <- clinical %>% 
-  mutate(PATIENT_ID = normalize_tcga(PATIENT_ID))
+dim(expr_filt)
+dim(clinical_filt)
+```
 
+### SECTION 3: Normalization
 
-
-common_ids <- intersect(
-  clinical$PATIENT_ID,
-  colnames(expr)[-1]
+```{r}
+# Building DESeqDataSet using filtered & matched data
+dds <- DESeqDataSetFromMatrix(
+  countData = expr_filt,      # <- use expr_filt
+  colData   = clinical_filt,  # <- use clinical_filt
+  design    = ~ 1             # no specific design yet
 )
 
-cat("\nNumber of matched patients:", length(common_ids), "\n")
+# Keeping only genes with 10 or more counts
+keep <- rowSums(counts(dds)) >= 10
+dds  <- dds[keep, ]
 
-# Filter clinical to matched samples
-clinical_matched <- clinical %>%
-  filter(PATIENT_ID %in% common_ids)
+# Normalized counts
+dds <- estimateSizeFactors(dds)
+norm_counts <- counts(dds, normalized = TRUE)
 
-# Filter expression matrix to matched samples
-expr_matched <- expr %>%
-  select(Gene, all_of(common_ids))
+# Variance stabilized transform (for downstream analysis such as clustering)
+vsd <- vst(dds, blind = TRUE)
+expr_vst <- assay(vsd)
 
-
-gene_names <- expr_matched$Gene
-expr_matrix <- as.matrix(expr_matched[,-1])
-rownames(expr_matrix) <- gene_names
-
-# Ensure numeric (RNA-seq sometimes loads as character)
-expr_matrix <- apply(expr_matrix, 2, as.numeric)
+dim(expr_vst)
+expr_vst[1:5, 1:5]
 
 
-
-gene_var <- apply(expr_matrix, 1, var)
-top_n <- 500  # number of highly variable genes to keep
-top_genes <- names(sort(gene_var, decreasing = TRUE))[1:top_n]
-
-expr_hvg <- expr_matrix[top_genes, ]
+```
 
 
+### Section 4: Create function to convert gene codes to actual gene names
+
+```{r}
+get_gene_symbols <- function(ens_ids) {
+  # Remove version numbers
+  ens_clean <- sub("\\..*", "", ens_ids)
+  
+  # Map Ensembl IDs → gene symbols
+  symbol_map <- mapIds(
+    org.Hs.eg.db,
+    keys = ens_clean,
+    keytype = "ENSEMBL",
+    column = "SYMBOL",
+    multiVals = "first"
+  )
+  
+  # Replace any NA with original ENSG ID if no symbol found
+  symbol_map[is.na(symbol_map)] <- ens_ids[is.na(symbol_map)]
+  
+  # Return just the values as a plain vector
+  unname(symbol_map)
+}
 
 
 
 ```
+
+### SECTION 5: PCA ###
+```{r}
+expr_vst_t <- t(expr_vst)
+
+# Perform PCA
+pca_res <- prcomp(expr_vst_t, center = TRUE, scale. = FALSE)
+
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+var_explained_percent <- round(var_explained * 100, 2)
+
+var_explained_percent[1:5]   
+
+
+
+```
+
+PCA is useful in RNA-seq expression analysis because gene expression data are high-dimensional and continuous, with thousands of genes varying across samples. PCA reduces this complexity by identifying the major axes of variation that summarize overall biological patterns, such as immune activity, tumor purity, or cell-cycle programs, and helps reveal whether clinical factors (like early vs late cancer stage) naturally separate in the data. However, this same approach does not make sense for the mutation dataset, because mutation matrices are extremely sparse and binary—most genes are unmutated in most patients, producing almost all zeros with no continuous gradients of variation. Without meaningful covariance or continuous structure, PCA cannot extract biologically relevant components from mutation data. In short, PCA works well for continuous gene expression matrices but is not appropriate for sparse 0/1 mutation profiles.
+
+```{r}
+# Loadings for PC1
+pc1_loadings <- pca_res$rotation[, 1]  
+pc1_abs <- abs(pc1_loadings)
+top10_genes_pc1 <- names(sort(pc1_abs, decreasing = TRUE))[1:10]
+top10_genes_pc1_symbols <- get_gene_symbols(top10_genes_pc1)
+top10_genes_pc1_symbols
+
+```  
+
+us
+
+
+
+CYP3A4 is a crucial enzyme in the liver, and its expression can significantly impact liver cancer. The gene is involved in the metabolism of more than 50% of prescription drugs, and its polymorphisms can influence how patients metabolize chemotherapeutic agents, affecting treatment outcomes and the risk of adverse effects. Genetic testing for CYP3A4 variants may offer valuable insights for personalized cancer therapy, as these variants can alter enzyme activity and influence the effectiveness of chemotherapy. 
+
+hypothesis: The genes with the most varaince will likley have an impact on cancer
+
+
+
+use PCA1-PCAn to do analysis like clustering - then when we want to do analysis we can look at the top genes that make up each pca to see what genes supply the most variance
+
+
+
+
 

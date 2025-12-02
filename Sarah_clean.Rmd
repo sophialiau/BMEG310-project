@@ -1,11 +1,8 @@
 ---
-title: "Mutation and Clinical Analysis of Liver Hepatocellular Carcinoma Code Base"
-author: "Group 15"
+title: "Sarah"
+author: "Sarah Dumont"
 date: "2025-11-25"
-output:
-  pdf_document:
-    latex_engine: xelatex
-  html_document: default
+output: html_document
 ---
 
 
@@ -22,8 +19,6 @@ library(ggplot2)
 library(tidyr)
 library(e1071)
 library(purrr)
-library(survival)
-library(survminer)
 
 ```
 
@@ -35,9 +30,7 @@ library(survminer)
 
 ```{r setup, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-```
 
-```{r}
 clinical <- read_tsv(
   "data_clinical_patient.txt",
   comment = "#",
@@ -762,7 +755,7 @@ results
 summary_stats
 
 ```
-### Section 21 ###
+
 
 
 ```{r}
@@ -849,7 +842,7 @@ hist(age_data$Diagnosis.Age,
 
 
 
-
+### Section 21 ###
 
 
 ### Section 22 ###
