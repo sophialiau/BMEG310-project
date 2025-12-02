@@ -491,7 +491,6 @@ for (ep in names(surv_endpoints)) {
   cat("================================\n")
   print(summary(fit))
   
-  # optional forest plot
   print(
     ggforest(fit, data = clinical2,
              main = paste0(ep, " – Multivariable Cox Model"))
@@ -573,7 +572,6 @@ for (ep in names(surv_endpoints)) {
   cat("\n--- Multivariable Cox (adjusted for age, sex, stage) ---\n")
   print(summary(fit_multi))
   
-  # Optional: forest plot
   print(
     ggforest(fit_multi, 
              data = clinical2,
@@ -623,6 +621,20 @@ rnaseq$Gene <- genes
 head(colnames(rnaseq))
 ```
 
+
+Gene ID to gene name
+
+
+
+
+
+
+
+
+
+
+
+
 ##Section 2
 
 Convert to Matrix & Remove Low-Expressed Genes Keep genes with > 10 counts in > 20% of samples.
@@ -630,6 +642,7 @@ Convert to Matrix & Remove Low-Expressed Genes Keep genes with > 10 counts in > 
 ```{r}
 # Convert to matrix
 count_mat <- rnaseq[, -1]
+
 row.names(count_mat) <- rnaseq$Gene
 count_mat <- as.matrix(count_mat)
 
@@ -715,7 +728,7 @@ library(pheatmap)
 library(ggplot2)
 
 var_genes <- rowVars(vst_mat)
-hvg_index <- order(var_genes, decreasing = TRUE)[1:1000]
+hvg_index <- order(var_genes, decreasing = TRUE)[1:500]
 hvg_mat <- vst_mat[hvg_index, ]
 
 
@@ -726,9 +739,9 @@ dist_samples <- dist(t(hvg_mat))
 hc <- hclust(dist_samples, method = "ward.D2")
 
 # Plot dendrogram
-plot(hc, labels = FALSE, main = "Hierarchical Clustering of LIHC (Top 1000 HVGs)")
+plot(hc, labels = FALSE, main = "Hierarchical Clustering of LIHC (Top 500 HVGs)")
 
-k <- 4   # you can change this to 3 or 4
+k <- 3   # 3 or 4
 clusters <- cutree(hc, k = k)
 
 # Assign cluster labels
@@ -737,6 +750,7 @@ names(Expression_Cluster) <- colnames(hvg_mat)
 
 table(Expression_Cluster)
 ```
+
 This helps visualize whether the clusters are well-separated.
 
 ```{r}
@@ -771,9 +785,6 @@ Merge expression clusters with clinical data (handle missing patients)
 ```{r}
 library(dplyr)
 
-## Expression_Cluster should already exist from Investigation 2
-## names(Expression_Cluster) are patient IDs like "TCGA-2Y-A95S"
-
 expr_cluster_df <- data.frame(
   Patient_ID        = names(Expression_Cluster),
   Expression_Cluster = as.factor(as.character(Expression_Cluster)),
@@ -807,12 +818,12 @@ Cluster vs clinical
 ```{r}
 clinical_expr$Stage_Grouped <- ifelse(grepl("^STAGE I$",   clinical_expr$Stage), "I",
                                ifelse(grepl("^STAGE II$",  clinical_expr$Stage), "II",
-                               ifelse(grepl("^STAGE III", clinical_expr$Stage), "III",
-                               ifelse(grepl("^STAGE IV",  clinical_expr$Stage), "IV",
+                               ifelse(grepl("^STAGE III", clinical_expr$Stage), "III/IV",
+                               ifelse(grepl("^STAGE IV",  clinical_expr$Stage), "III/IV",
                                       NA))))
 
 clinical_expr$Stage_Grouped <- factor(clinical_expr$Stage_Grouped,
-                                      levels = c("I", "II", "III", "IV"),
+                                      levels = c("I", "II", "III/IV"),
                                       ordered = TRUE)
 
 clinical_expr <- clinical_expr %>%
@@ -843,6 +854,7 @@ tab_stage_expr <- table(clinical_expr$Expression_Cluster, clinical_expr$Stage_Gr
 tab_stage_expr
 
 chisq.test(tab_stage_expr)
+
 ```
 
 
@@ -900,6 +912,47 @@ for (ep in names(surv_endpoints)) {
 }
 ```
 
+```{r}
+# Remove NA
+surv_df <- clinical_expr %>%
+  filter(!is.na(Overall_Time), !is.na(Patient_ID))
+
+median_os <- median(surv_df$Overall_Time, na.rm = TRUE)
+
+surv_df$Surv_Group <- ifelse(
+  surv_df$Overall_Time > median_os, "High", "Low"
+)
+
+table(surv_df$Surv_Group)
+```
+
+```{r}
+library(EnhancedVolcano)
+# Subset count matrix to only patients with survival info
+common_ids_surv <- intersect(colnames(count_mat_filt), surv_df$Patient_ID)
+
+count_surv <- count_mat_filt[, common_ids_surv]
+surv_df2 <- surv_df[match(common_ids_surv, surv_df$Patient_ID), ]
+
+stopifnot(all(colnames(count_surv) == surv_df2$Patient_ID))
+
+dds_surv <- DESeqDataSetFromMatrix(
+  countData = count_surv,
+  colData   = data.frame(Survival = factor(surv_df2$Surv_Group)),
+  design    = ~ Survival
+)
+
+dds_surv <- DESeq(dds_surv)
+res_surv <- results(dds_surv, contrast = c("Survival", "High", "Low"))
+res_surv <- res_surv[order(res_surv$padj), ]
+
+EnhancedVolcano(res_surv,
+                lab = rownames(res_surv),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = 'High vs Low Overall Survival')
+```
+
 
 ##Section 9 
 
@@ -931,11 +984,182 @@ summary(cox_OS_adj)
 
 
 
+```{r}
+library(org.Hs.eg.db)
+library(clusterProfiler)
+#count matrix or csv
+rnaseq$Gene_clean <- sub("\\..*$", "", rnaseq$Gene)
+
+# Map Ensembl → Symbol
+gene_map <- bitr(
+  rnaseq$Gene_clean,
+  fromType = "ENSEMBL",
+  toType   = "SYMBOL",
+  OrgDb    = org.Hs.eg.db
+)
+
+head(gene_map)
+
+
+```
 
 
 
+##Section 10
+
+```{r}
+expr_mut_merge <- merge(
+  clinical_expr[, c("Patient_ID", "Expression_Cluster")],
+  clinical2[, c("Patient_ID", "Mutation_Cluster")],
+  by = "Patient_ID"
+)
+
+# Convert to factor
+expr_mut_merge$Expression_Cluster <- factor(expr_mut_merge$Expression_Cluster)
+expr_mut_merge$Mutation_Cluster   <- factor(expr_mut_merge$Mutation_Cluster)
+
+# Check counts
+table(expr_mut_merge$Expression_Cluster)
+table(expr_mut_merge$Mutation_Cluster)
+
+## -------------------------------
+## 1. Contingency Table
+## -------------------------------
+tab_expr_mut <- table(expr_mut_merge$Expression_Cluster,
+                      expr_mut_merge$Mutation_Cluster)
+
+tab_expr_mut
+```
+
+
+```{r}
+# Use Fisher if any cell < 5
+if(any(tab_expr_mut < 5)) {
+  test_expr_mut <- fisher.test(tab_expr_mut)
+} else {
+  test_expr_mut <- chisq.test(tab_expr_mut)
+}
+
+test_expr_mut
+```
+
+
+```{r}
+prop_expr_mut <- prop.table(tab_expr_mut, margin = 1)
+
+barplot(t(prop_expr_mut),
+        beside      = TRUE,
+        col         = c("#E76F51", "#2A9D8F"),
+        legend      = TRUE,
+        xlab        = "Expression Cluster",
+        ylab        = "Proportion",
+        main        = "Mutation-Cluster Composition Within Each Expression Cluster")
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(expr_mut_merge, aes(x = Expression_Cluster,
+                           fill = Mutation_Cluster)) +
+  geom_bar(position = "fill") +
+  labs(title = "Mutation Cluster Distribution Across Expression Clusters",
+       x = "Expression Cluster",
+       y = "Proportion") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_minimal()
+```
 
 
 
+##Section 11
+
+```{r}
+common_ids_sex <- intersect(colnames(count_mat_filt), clinical_expr$Patient_ID)
+
+count_sex <- count_mat_filt[, common_ids_sex]
+clin_sex <- clinical_expr[match(common_ids_sex, clinical_expr$Patient_ID), ]
+
+stopifnot(all(colnames(count_sex) == clin_sex$Patient_ID))
+
+# Ensure Sex is a factor
+clin_sex$Sex <- factor(clin_sex$Sex)
+table(clin_sex$Sex)
+```
+
+```{r}
+library(DESeq2)
+
+dds_sex <- DESeqDataSetFromMatrix(
+  countData = count_sex,
+  colData   = data.frame(Sex = clin_sex$Sex),
+  design    = ~ Sex
+)
+
+dds_sex <- DESeq(dds_sex)
+```
+
+```{r}
+res_sex <- results(dds_sex, contrast = c("Sex", "Male", "Female"))
+res_sex <- res_sex[order(res_sex$padj), ]
+head(res_sex)
+```
+
+```{r}
+library(EnhancedVolcano)
+
+EnhancedVolcano(
+  res_sex,
+  lab = rownames(res_sex),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'Differential Expression: Male vs Female',
+  pCutoff = 0.05,
+  FCcutoff = 1
+)
+```
+
+```{r}
+clin_age <- clinical_expr %>%
+  filter(!is.na(Diagnosis.Age))
+
+median_age <- median(clin_age$Diagnosis.Age, na.rm = TRUE)
+
+clin_age$Age_Group <- ifelse(
+  clin_age$Diagnosis.Age > median_age, "Old", "Young"
+)
+
+table(clin_age$Age_Group)
+clin_age$Age_Group <- factor(clin_age$Age_Group)
+```
+
+```{r}
+common_ids_age <- intersect(colnames(count_mat_filt), clin_age$Patient_ID)
+
+count_age <- count_mat_filt[, common_ids_age]
+clin_age2 <- clin_age[match(common_ids_age, clin_age$Patient_ID), ]
+
+stopifnot(all(colnames(count_age) == clin_age2$Patient_ID))
+```
+
+```{r}
+dds_age <- DESeqDataSetFromMatrix(
+  countData = count_age,
+  colData   = data.frame(Age_Group = clin_age2$Age_Group),
+  design    = ~ Age_Group
+)
+
+dds_age <- DESeq(dds_age)
+
+res_age <- results(dds_age, contrast = c("Age_Group", "Old", "Young"))
+res_age <- res_age[order(res_age$padj), ]
+head(res_age)
+EnhancedVolcano(
+  res_age,
+  lab = rownames(res_age),
+  x = 'log2FoldChange',
+  y = 'padj',
+  title = 'Differential Expression: Old vs Young'
+)
+```
 
 
