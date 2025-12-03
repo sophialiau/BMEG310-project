@@ -48,25 +48,6 @@ expr_raw <- read.csv(
 
 ## Secion 2
 
-Patient ID standardization
-
-```{r}
-genes <- rnaseq[, 1]
-patient_cols <- colnames(rnaseq)[-1]
-
-# Replace "." with "-"
-patient_cols2 <- gsub("\\.", "-", patient_cols)
-
-# Extract the first 3 barcode components: TCGA-XX-YYYY
-# TCGA-AB-1234-... → TCGA-AB-1234
-patient_ids <- sapply(patient_cols2, function(x) {
-  parts <- strsplit(x, "-")[[1]]
-  paste(parts[1:3], collapse = "-")
-})
-colnames(rnaseq) <- c("Gene", patient_ids)
-rnaseq$Gene <- genes
-```
-
 ```{r}
 clinical$Patient_ID <- clinical$PATIENT_ID
 mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
@@ -322,7 +303,7 @@ hc <- hclust(dist_samples, method = "ward.D2")
 # Plot dendrogram
 plot(hc, labels = FALSE, main = "Hierarchical Clustering of RNA-Seq Top 200 PCs")
 
-k <- 3   # 3 or 4
+k <- 4   # 3 or 4
 clusters <- cutree(hc, k = k)
 
 # Assign cluster labels
@@ -493,8 +474,8 @@ length(common_ids)   # number of overlapping patients
 ```{r}
 df_compare <- data.frame(
   Patient_ID = common_ids,
-  Expression_Cluster = clinical_filt[common_ids, "Expression_Cluster"],
-  Mutation_Cluster   = clinical_mutation[common_ids, "Mutation_Cluster"]
+  Expression_Cluster = clinical_filt[clinical_filt$Patient_ID %in% common_ids, "Expression_Cluster"],
+  Mutation_Cluster = clinical_mutation[clinical_mutation$Patient_ID %in% common_ids, "Mutation_Cluster"]
 )
 
 # Make factors
@@ -603,8 +584,65 @@ EnhancedVolcano(
 
 ```
 
+```{r}
+res_1v4 <- results(dds_clusters, contrast = c("Expression_Cluster", "4", "1"))
+res_1v4 <- lfcShrink(dds_clusters, contrast = c("Expression_Cluster","4","1"), type = "ashr")
 
+res_1v4 <- as.data.frame(res_1v4)
+res_1v4$Gene <- rownames(res_1v4)
+res_1v4$SYMBOL <- get_gene_symbols(res_1v4$Gene)
 
+head(res_1v4)
+
+EnhancedVolcano(
+  res_1v4,
+  lab = res_1v4$SYMBOL,
+  x = 'log2FoldChange',
+  y = 'pvalue',
+  title = 'DE: Cluster 4 vs Cluster 1'
+)
+
+```
+
+```{r}
+res_2v4 <- results(dds_clusters, contrast = c("Expression_Cluster", "4", "2"))
+res_2v4 <- lfcShrink(dds_clusters, contrast = c("Expression_Cluster","4","2"), type = "ashr")
+
+res_2v4 <- as.data.frame(res_1v4)
+res_2v4$Gene <- rownames(res_1v4)
+res_2v4$SYMBOL <- get_gene_symbols(res_1v4$Gene)
+
+head(res_2v4)
+
+EnhancedVolcano(
+  res_2v4,
+  lab = res_2v4$SYMBOL,
+  x = 'log2FoldChange',
+  y = 'pvalue',
+  title = 'DE: Cluster 4 vs Cluster 2'
+)
+
+```
+
+```{r}
+res_3v4 <- results(dds_clusters, contrast = c("Expression_Cluster", "4", "3"))
+res_3v4 <- lfcShrink(dds_clusters, contrast = c("Expression_Cluster","4","3"), type = "ashr")
+
+res_3v4 <- as.data.frame(res_1v4)
+res_3v4$Gene <- rownames(res_1v4)
+res_3v4$SYMBOL <- get_gene_symbols(res_1v4$Gene)
+
+head(res_3v4)
+
+EnhancedVolcano(
+  res_3v4,
+  lab = res_3v4$SYMBOL,
+  x = 'log2FoldChange',
+  y = 'pvalue',
+  title = 'DE: Cluster 4 vs Cluster 3'
+)
+
+```
 ## Section 19
 
 Survival Differential Expression
