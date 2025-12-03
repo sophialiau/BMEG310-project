@@ -855,30 +855,24 @@ table(clinical_expr$Expression_Cluster)
 Cluster vs clinical
 
 ```{r}
-clinical_expr$Stage_Grouped <- ifelse(grepl("^STAGE I$",   clinical_expr$Stage), "I",
-                               ifelse(grepl("^STAGE II$",  clinical_expr$Stage), "II",
-                               ifelse(grepl("^STAGE III", clinical_expr$Stage), "III/IV",
-                               ifelse(grepl("^STAGE IV",  clinical_expr$Stage), "III/IV",
-                                      NA))))
-
-clinical_expr$Stage_Grouped <- factor(clinical_expr$Stage_Grouped,
+clinical_filt$Stage_Grouped <- factor(clinical_filt$Stage_Grouped,
                                       levels = c("I", "II", "III/IV"),
                                       ordered = TRUE)
 
-clinical_expr <- clinical_expr %>%
+clinical_filt <- clinical_filt %>%
   mutate(
     Sex               = factor(Sex),
     Expression_Cluster = factor(Expression_Cluster)
   )
 
 ## Age vs cluster (Kruskal–Wallis)
-boxplot(Diagnosis.Age ~ Expression_Cluster, data = clinical_expr,
+boxplot(Diagnosis.Age ~ Expression_Cluster, data = clinical_filt,
         main = "Age by Expression Cluster",
         xlab = "Expression Cluster", ylab = "Diagnosis Age (years)")
-kruskal.test(Diagnosis.Age ~ Expression_Cluster, data = clinical_expr)
+kruskal.test(Diagnosis.Age ~ Expression_Cluster, data = clinical_filt)
 
 ## Sex vs cluster (χ² or Fisher)
-tab_sex_expr <- table(clinical_expr$Expression_Cluster, clinical_expr$Sex)
+tab_sex_expr <- table(clinical_filt$Expression_Cluster, clinical_filt$Sex)
 tab_sex_expr
 
 if (any(tab_sex_expr < 5)) {
@@ -889,7 +883,7 @@ if (any(tab_sex_expr < 5)) {
 test_sex_expr
 
 ## Stage vs cluster (Stage_3Group for power)
-tab_stage_expr <- table(clinical_expr$Expression_Cluster, clinical_expr$Stage_Grouped)
+tab_stage_expr <- table(clinical_filt$Expression_Cluster, clinical_filt$Stage_Grouped)
 tab_stage_expr
 
 chisq.test(tab_stage_expr)
