@@ -648,11 +648,7 @@ EnhancedVolcano(
 Survival Differential Expression
 
 ```{r}
-## Section 17
-## Survival Differential Expression (Gene-wise Cox models with filtering
-### ---------------------------
-### Step 1 — Filter low-expression genes
-### ---------------------------
+## Filter low-expression genes
 
 # Keep genes expressed in at least 20% of samples (VST > 1)
 expr_threshold <- 1
@@ -664,9 +660,7 @@ expr_vst_filtered <- expr_vst[
 
 cat("After low-expression filtering:", nrow(expr_vst_filtered), "genes\n")
 
-### ---------------------------
-### Step 2 — Filter low-variance genes
-### ---------------------------
+## Filter low-variance genes
 
 vars <- rowVars(expr_vst_filtered)
 var_cutoff <- quantile(vars, 0.20)  # bottom 20% removed
@@ -675,25 +669,19 @@ expr_vst_filtered <- expr_vst_filtered[vars > var_cutoff, ]
 
 cat("After variance filtering:", nrow(expr_vst_filtered), "genes remain\n")
 
-### ---------------------------
-### Step 3 — Keep only patients with valid OS info
-### ---------------------------
+## Keep only patients with valid OS info
 
 os_data <- clinical_filt %>%
   filter(!is.na(Overall_Time),
          !is.na(Overall_Status),
          Overall_Time > 0)
 
-### ---------------------------
-### Step 4 — Match filtered expression to OS patients
-### ---------------------------
+## Match filtered expression to OS patients
 
 expr_os <- expr_vst_filtered[, rownames(os_data)]
 stopifnot(all(colnames(expr_os) == rownames(os_data)))
 
-### ---------------------------
-### Step 5 — Run Cox model for each gene
-### ---------------------------
+## Run Cox model for each gene
 
 cox_list <- lapply(seq_len(nrow(expr_os)), function(i) {
   gene_expr <- expr_os[i, ]
@@ -712,9 +700,6 @@ cox_list <- lapply(seq_len(nrow(expr_os)), function(i) {
 
 cox_mat <- do.call(rbind, cox_list)
 cox_df  <- as.data.frame(cox_mat)
-
-### ---------------------------
-### Step 6 — A
 
 cox_df$ENSEMBL <- rownames(expr_os)
 cox_df$SYMBOL  <- get_gene_symbols(cox_df$ENSEMBL)
@@ -755,9 +740,9 @@ EnhancedVolcano(
 KM plot for top 6 survival genes
 
 ```{r}
-top_n <- 6   # e.g., top 6 genes highlighted in the volcano
+top_n <- 6   # top 6 genes highlighted in the volcano
 
-# Get top survival genes (sorted by padj)
+# Get top survival genes 
 top_genes <- head(cox_df$ENSEMBL[order(cox_df$padj)], top_n)
 top_symbols <- get_gene_symbols(top_genes)
 
@@ -836,7 +821,7 @@ clinical_sub <- clinical_filt
 
 stopifnot(all(colnames(expr_mat_sub) == rownames(clinical_sub)))
 
-## ---- Age groups (median split) ----
+## median split age group
 clinical_sub$AgeGroup <- ifelse(
   clinical_sub$Diagnosis.Age >= median(clinical_sub$Diagnosis.Age, na.rm = TRUE),
   "Old",
