@@ -1,0 +1,433 @@
+---
+title: "Minh_clean"
+author: "Group15"
+date: "2025-12-03"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(survival)
+library(survminer)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(DESeq2)
+library(pheatmap)
+library(matrixStats)
+```
+
+
+## Section 1
+
+Load datasets
+
+```{r}
+clinical <- read_tsv(
+  "data_clinical_patient.txt",
+  comment = "#",
+  show_col_types = FALSE
+)
+
+clinical <- clinical[-c(1, 2, 3, 4), ]
+mutations <- read.delim("data_mutations.txt", header = TRUE,
+                      sep = "\t", stringsAsFactors = FALSE)
+
+expr_raw <- read.csv(
+  "RNAseq_LIHC.csv",
+  header = TRUE,
+  row.names = 1,          
+  check.names = FALSE     
+)
+                       
+```
+
+## Secion 2
+
+Patient ID standardization
+
+```{r}
+genes <- rnaseq[, 1]
+patient_cols <- colnames(rnaseq)[-1]
+
+# Replace "." with "-"
+patient_cols2 <- gsub("\\.", "-", patient_cols)
+
+# Extract the first 3 barcode components: TCGA-XX-YYYY
+# TCGA-AB-1234-... → TCGA-AB-1234
+patient_ids <- sapply(patient_cols2, function(x) {
+  parts <- strsplit(x, "-")[[1]]
+  paste(parts[1:3], collapse = "-")
+})
+colnames(rnaseq) <- c("Gene", patient_ids)
+rnaseq$Gene <- genes
+```
+
+```{r}
+clinical$Patient_ID <- clinical$PATIENT_ID
+mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
+
+common_ids <- intersect(clinical$Patient_ID, mutations$Patient_ID)
+clinical_mutation <- clinical[clinical$Patient_ID %in% common_ids, ]
+mutations <- mutations[mutations$Patient_ID %in% common_ids, ]
+```
+
+## Section 3
+
+Filter mutation
+
+```{r}
+nonsynonymous <- c(
+  "Missense_Mutation", "Nonsense_Mutation",
+  "Frame_Shift_Del", "Frame_Shift_Ins",
+  "In_Frame_Del", "In_Frame_Ins",
+  "Splice_Site", "Splice_Region", "Nonstop_Mutation", 
+  "Translation_Start_Site"
+)
+mut_filt <- mutations[mutations$Variant_Classification %in% nonsynonymous, ]
+
+```
+
+##Section 4
+
+Gene x Patient Matrix 
+
+```{r}
+genes <- unique(mut_filt$Hugo_Symbol)
+patients <- unique(mut_filt$Patient_ID)
+
+mut_matrix <- matrix(0, nrow = length(genes), ncol = length(patients))
+rownames(mut_matrix) <- genes
+colnames(mut_matrix) <- patients
+
+for (i in seq_len(nrow(mut_filt))) {
+    g <- mut_filt$Hugo_Symbol[i]
+    p <- mut_filt$Patient_ID[i]
+    mut_matrix[g, p] <- 1
+}
+```
+
+## Section 5
+
+Transform survival variables
+```{r}
+parse_status <- function(x) {
+    as.numeric(sub(":.*", "", x))
+}
+
+# Convert time strings ("63.72") to numeric
+parse_time <- function(x) {
+    as.numeric(trimws(x))
+}
+
+# Age
+clinical$Diagnosis.Age <- parse_time(clinical$AGE)
+# Survival Times
+clinical$Overall_Time  <- parse_time(clinical$OS_MONTHS)
+clinical$DSS_Time      <- parse_time(clinical$DSS_MONTHS)
+clinical$DFS_Time      <- parse_time(clinical$DFS_MONTHS)
+clinical$PFS_Time      <- parse_time(clinical$PFS_MONTHS)
+# Survival Status
+clinical$Overall_Status <- parse_status(clinical$OS_STATUS)
+clinical$DSS_Status     <- parse_status(clinical$DSS_STATUS)
+clinical$DFS_Status     <- parse_status(clinical$DFS_STATUS)
+clinical$PFS_Status     <- parse_status(clinical$PFS_STATUS)
+
+```
+
+
+## Section 6
+
+Grouping staged
+
+```{r}
+# Create grouped clinical stage
+clinical$Stage_Grouped <- clinical$AJCC_PATHOLOGIC_TUMOR_STAGE  # start with original
+
+clinical$Stage_Grouped <- ifelse(grepl("^STAGE I$", clinical$AJCC_PATHOLOGIC_TUMOR_STAGE), "I",
+                          ifelse(grepl("^STAGE II$", clinical$AJCC_PATHOLOGIC_TUMOR_STAGE), "II",
+                          ifelse(grepl("^STAGE III", clinical$AJCC_PATHOLOGIC_TUMOR_STAGE), "III/IV",
+                          ifelse(grepl("^STAGE IV", clinical$AJCC_PATHOLOGIC_TUMOR_STAGE), "III/IV",
+                                 NA))))
+```
+
+
+## Section 7 
+
+Mutation-Based Cluster
+
+```{r}
+gene_counts <- rowSums(mut_matrix)
+top_genes <- names(sort(gene_counts, decreasing = TRUE))[1:10]
+mut_top <- mut_matrix[top_genes, ]
+
+clinical_mutation <- clinical[match(colnames(mut_top), clinical$Patient_ID), ]
+stopifnot(all(clinical_mutation$Patient_ID == colnames(mut_top)))
+
+dist_mat <- dist(t(mut_top), method = "binary")
+hc <- hclust(dist_mat, method = "ward.D2")
+
+plot(hc, labels = FALSE,
+     main = "Clustering Based on Top 10 Mutated Genes")
+
+clusters <- cutree(hc, k = 2)
+clinical_mutation$Mutation_Cluster <- clusters
+```
+
+## Section 8
+
+Gene code to name
+```{r}
+get_gene_symbols <- function(ens_ids) {
+  # Remove version numbers
+  ens_clean <- sub("\\..*", "", ens_ids)
+  
+  # Map Ensembl IDs → gene symbols
+  symbol_map <- mapIds(
+    org.Hs.eg.db,
+    keys = ens_clean,
+    keytype = "ENSEMBL",
+    column = "SYMBOL",
+    multiVals = "first"
+  )
+  
+  # Replace any NA with original ENSG ID if no symbol found
+  symbol_map[is.na(symbol_map)] <- ens_ids[is.na(symbol_map)]
+  
+  # Return just the values as a plain vector
+  unname(symbol_map)
+}
+```
+
+## Section 9
+
+Keep only patients in both clinical and expression data
+
+```{r}
+dim(expr_raw)
+expr_raw[1:5, 1:5]
+
+# Make expression matrix numeric
+expr_mat <- as.matrix(expr_raw)
+mode(expr_mat) <- "numeric"
+
+clinical <- as.data.frame(clinical)
+
+rownames(clinical) <- clinical$PATIENT_ID
+
+colnames(expr_mat) <- substr(colnames(expr_mat), 1, 12)
+
+common_ids <- intersect(colnames(expr_mat), rownames(clinical))
+length(common_ids)
+
+expr_filt    <- expr_mat[, common_ids]
+clinical_filt <- clinical[common_ids, ]
+
+# Check they are aligned
+stopifnot(all(colnames(expr_filt) == rownames(clinical_filt)))
+
+dim(expr_filt)
+dim(clinical_filt)
+```
+
+
+## Section 10
+
+Normalization
+```{r}
+# Building DESeqDataSet using filtered & matched data
+dds <- DESeqDataSetFromMatrix(
+  countData = expr_filt,      # <- use expr_filt
+  colData   = clinical_filt,  # <- use clinical_filt
+  design    = ~ 1             # no specific design yet
+)
+
+# Keeping only genes with 10 or more counts
+keep <- rowSums(counts(dds)) >= 10
+dds  <- dds[keep, ]
+
+# Normalized counts
+dds <- estimateSizeFactors(dds)
+norm_counts <- counts(dds, normalized = TRUE)
+
+# Variance stabilized transform (for downstream analysis such as clustering)
+vsd <- vst(dds, blind = TRUE)
+expr_vst <- assay(vsd)
+
+dim(expr_vst)
+expr_vst[1:5, 1:5]
+```
+
+## Section 11
+
+PCA
+```{r}
+expr_vst_t <- t(expr_vst)
+
+# Perform PCA
+pca_res <- prcomp(expr_vst_t, center = TRUE, scale. = FALSE)
+
+var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+var_explained_percent <- round(var_explained * 100, 2)
+
+sum(var_explained_percent[1:203])   
+```
+
+## Section 12
+
+PCA plot and heatmap
+```{r}
+pca_df <- data.frame(
+  PC1 = pca_res$x[,1],
+  PC2 = pca_res$x[,2],
+  Sample = rownames(pca_res$x)
+)
+
+ggplot(pca_df, aes(PC1, PC2)) +
+  geom_point(size = 2) +
+  labs(title = "PCA of LIHC RNA-seq",
+       x = paste0("PC1 (", round(summary(pca_res)$importance[2,1] * 100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_res)$importance[2,2] * 100, 1), "%)"))
+```
+
+```{r}
+sample_dist <- dist(t(expr_vst))
+sample_dist_mat <- as.matrix(sample_dist)
+
+pheatmap(sample_dist_mat,
+         clustering_method = "ward.D2",
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         main = "Sample Distance Heatmap (VST Expression)")
+```
+
+## Section 13
+
+Clustering
+
+```{r}
+var_genes <- rowVars(expr_vst)
+hvg_index <- order(var_genes, decreasing = TRUE)[1:500]
+hvg_mat <- expr_vst[hvg_index, ]
+
+dist_samples <- dist(t(hvg_mat))  
+
+# Hierarchical clustering
+hc <- hclust(dist_samples, method = "ward.D2")
+
+# Plot dendrogram
+plot(hc, labels = FALSE, main = "Hierarchical Clustering of RNA-Seq Top 200 PCs")
+
+k <- 3   # 3 or 4
+clusters <- cutree(hc, k = k)
+
+# Assign cluster labels
+Expression_Cluster <- as.factor(clusters)
+names(Expression_Cluster) <- colnames(hvg_mat)
+clinical_filt$Expression_Cluster 
+
+table(Expression_Cluster)
+```
+
+Visualization
+
+```{r}
+pheatmap(hvg_mat,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         clustering_method = "ward.D2",
+         annotation_col = data.frame(Cluster = Expression_Cluster),
+         main = "Heatmap of Top 1000 HVGs (LIHC)")
+
+# PCA on HVGs
+pca_hvg <- prcomp(t(hvg_mat))
+
+pca_df <- data.frame(
+  PC1 = pca_hvg$x[,1],
+  PC2 = pca_hvg$x[,2],
+  Cluster = Expression_Cluster
+)
+
+ggplot(pca_df, aes(PC1, PC2, color = Cluster)) +
+  geom_point(size = 2) +
+  labs(title = "PCA of LIHC RNA-seq (Top 1000 HVGs)",
+       x = paste0("PC1 (", round(summary(pca_hvg)$importance[2,1] * 100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_hvg)$importance[2,2] * 100, 1), "%)")) +
+  theme_minimal() +
+  scale_color_brewer(palette = "Dark2")
+```
+
+## Section 14
+
+Attach expression cluster to clinical data
+```{r}
+expr_cluster_df <- data.frame(
+  Patient_ID        = names(Expression_Cluster),
+  Expression_Cluster = as.factor(as.character(Expression_Cluster)),
+  stringsAsFactors  = FALSE
+)
+# Align orders
+clinical_filt <- clinical_filt[match(expr_cluster_df$Patient_ID, clinical_filt$Patient_ID), ]
+stopifnot(all(clinical_filt$Patient_ID == expr_cluster_df$Patient_ID))
+
+# Attach cluster info
+clinical_filt$Expression_Cluster <- expr_cluster_df$Expression_Cluster
+```
+
+## Section 15
+
+Expression clusters vs clinical
+
+```{r}
+clinical_filt$Stage_Grouped <- factor(clinical_filt$Stage_Grouped,
+                                      levels = c("I", "II", "III/IV"),
+                                      ordered = TRUE)
+
+clinical_filt <- clinical_filt %>%
+  mutate(
+    Sex               = factor(SEX),
+    Expression_Cluster = factor(Expression_Cluster)
+  )
+
+## Age vs cluster (Kruskal–Wallis)
+boxplot(Diagnosis.Age ~ Expression_Cluster, data = clinical_filt,
+        main = "Age by Expression Cluster",
+        xlab = "Expression Cluster", ylab = "Diagnosis Age (years)")
+kruskal.test(Diagnosis.Age ~ Expression_Cluster, data = clinical_filt)
+
+## Sex vs cluster (χ² or Fisher)
+tab_sex_expr <- table(clinical_filt$Expression_Cluster, clinical_filt$Sex)
+tab_sex_expr
+
+if (any(tab_sex_expr < 5)) {
+  test_sex_expr <- fisher.test(tab_sex_expr)
+} else {
+  test_sex_expr <- chisq.test(tab_sex_expr)
+}
+test_sex_expr
+
+## Stage vs cluster (Stage_3Group for power)
+tab_stage_expr <- table(clinical_filt$Expression_Cluster, clinical_filt$Stage_Grouped)
+tab_stage_expr
+
+chisq.test(tab_stage_expr)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

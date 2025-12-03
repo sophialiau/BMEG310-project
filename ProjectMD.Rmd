@@ -778,6 +778,45 @@ ggplot(pca_df, aes(PC1, PC2, color = Cluster)) +
   theme_minimal() +
   scale_color_brewer(palette = "Dark2")
 ```
+##PCA clustering
+
+```{r}
+
+# 1. Select top 500 HVGs
+var_genes <- rowVars(vst_mat)
+hvg_index <- order(var_genes, decreasing = TRUE)[1:500]
+hvg_mat <- vst_mat[hvg_index, ]
+
+# 2. PCA on HVGs
+pca_hvg <- prcomp(t(hvg_mat), scale. = TRUE)
+
+# Inspect variance explained
+summary(pca_hvg)
+
+pcs_for_clust <- pca_hvg$x[, 1:30]
+
+# Distance on PCA space (samples × PCs)
+dist_pca <- dist(pcs_for_clust)
+
+# Hierarchical clustering
+hc_pca <- hclust(dist_pca, method = "ward.D2")
+
+# Plot dendrogram
+plot(hc_pca, labels = FALSE, main = "Hierarchical Clustering on PCA Space")
+
+# Choose number of clusters
+k <- 3
+clusters <- cutree(hc_pca, k = k)
+
+# Store cluster labels
+Expression_Cluster <- as.factor(clusters)
+names(Expression_Cluster) <- colnames(hvg_mat)
+
+table(Expression_Cluster)
+
+```
+
+
 ##Section 7
 
 Merge expression clusters with clinical data (handle missing patients)
