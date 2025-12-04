@@ -19,6 +19,7 @@ library(pheatmap)
 library(matrixStats)
 library(EnhancedVolcano)
 library(ashr)
+library(patchwork)
 ```
 
 
@@ -399,6 +400,22 @@ tab_stage_expr
 
 chisq.test(tab_stage_expr)
 
+test_sex_expr <- as.table(as.matrix(tab_sex_expr))
+prop_sex <- prop.table(test_sex_expr, margin = 1)
+barplot(t(prop_sex),
+        beside = TRUE,
+        col = c("#E76F51", "#2A9D8F"),
+        legend = TRUE,
+        xlab = "Expression Cluster",
+        ylab = "Proportion",
+        main = "Proportion of Sex Within Each Expression Cluster")
+
+ggplot(clinical_filt[!is.na(clinical_filt$Stage_Grouped), ], 
+       aes(x = Expression_Cluster, fill = Stage_Grouped)) +
+    geom_bar(position = "fill") +
+    labs(title = "Stage Distribution (I, II, III/IV) Across Mutation Clusters",
+         x = "Mutation Cluster", y = "Proportion") +
+    theme_minimal()
 ```
 
 ## Section 16
@@ -442,7 +459,7 @@ for (ep in names(surv_endpoints)) {
     ggsurvplot(
       fit,
       data       = data_ep,
-      risk.table = TRUE,
+      risk.table = FALSE,
       pval       = TRUE,
       conf.int   = FALSE,
       legend.title = "Cluster",
@@ -496,7 +513,19 @@ if (any(tab_clusters < 5)) {
   test_res <- chisq.test(tab_clusters)
 }
 
-test_res
+test_res 
+
+tab_clusters <- as.table(as.matrix(tab_clusters))
+
+prop_expr_mut <- prop.table(tab_clusters, margin = 1)
+
+barplot(t(prop_expr_mut),
+        beside      = TRUE,
+        col         = c("#E76F51", "#2A9D8F"),
+        legend      = TRUE,
+        xlab        = "Expression Cluster",
+        ylab        = "Proportion",
+        main        = "Mutation-Cluster Composition Each Expression Cluster")
 ```
 
 ## Section 18
@@ -608,8 +637,8 @@ EnhancedVolcano(
 res_2v4 <- results(dds_clusters, contrast = c("Expression_Cluster", "4", "2"))
 res_2v4 <- lfcShrink(dds_clusters, contrast = c("Expression_Cluster","4","2"), type = "ashr")
 
-res_2v4 <- as.data.frame(res_1v4)
-res_2v4$Gene <- rownames(res_1v4)
+res_2v4 <- as.data.frame(res_2v4)
+res_2v4$Gene <- rownames(res_2v4)
 res_2v4$SYMBOL <- get_gene_symbols(res_1v4$Gene)
 
 head(res_2v4)
@@ -628,8 +657,8 @@ EnhancedVolcano(
 res_3v4 <- results(dds_clusters, contrast = c("Expression_Cluster", "4", "3"))
 res_3v4 <- lfcShrink(dds_clusters, contrast = c("Expression_Cluster","4","3"), type = "ashr")
 
-res_3v4 <- as.data.frame(res_1v4)
-res_3v4$Gene <- rownames(res_1v4)
+res_3v4 <- as.data.frame(res_3v4)
+res_3v4$Gene <- rownames(res_3v4)
 res_3v4$SYMBOL <- get_gene_symbols(res_1v4$Gene)
 
 head(res_3v4)
@@ -643,171 +672,343 @@ EnhancedVolcano(
 )
 
 ```
+
+```{r}
+make_volcano <- function(res, title, show_legend = FALSE) {
+  EnhancedVolcano(
+    res,
+    lab = res$SYMBOL,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = title,
+    pCutoff = 0.05,
+    FCcutoff = 1,
+    pointSize = 1.0,
+    labSize = 2.0,
+    colAlpha = 0.6,
+    drawConnectors = FALSE,
+    legendPosition = ifelse(show_legend, "right", "none"),
+    captionLabSize = 4,
+    titleLabSize = 9,
+    subtitleLabSize = 6,
+    axisLabSize = 7
+  ) +
+    theme(
+      plot.title = element_text(size = 9),
+      plot.subtitle = element_text(size = 6)
+    )
+}
+
+p_1v2 <- make_volcano(res_1v2, "Cluster 2 vs 1")
+p_1v3 <- make_volcano(res_1v3, "Cluster 3 vs 1")
+p_2v3 <- make_volcano(res_2v3, "Cluster 3 vs 2")
+p_1v4 <- make_volcano(res_1v4, "Cluster 4 vs 1")
+p_2v4 <- make_volcano(res_2v4, "Cluster 4 vs 2")
+p_3v4 <- make_volcano(res_3v4, "Cluster 4 vs 3")
+
+
+combined_plot <- 
+  (p_1v2 | p_1v3 | p_2v3) /
+  (p_1v4 | p_2v4 | p_3v4)
+
+combined_plot
+
+```
+
+
 ## Section 19
 
 Survival Differential Expression
 
 ```{r}
-## Filter low-expression genes
+run_survival_de <- function(time_col, status_col, expr_vst, clinical_filt) {
 
-# Keep genes expressed in at least 20% of samples (VST > 1)
-expr_threshold <- 1
-min_samples <- round(0.20 * ncol(expr_vst))
+  message("Running survival DE for: ", time_col)
 
-expr_vst_filtered <- expr_vst[
-  rowSums(expr_vst > expr_threshold) >= min_samples, 
-]
+  #filter clinical data
+  surv_data <- clinical_filt %>%
+    filter(!is.na(.data[[time_col]]),
+           !is.na(.data[[status_col]]),
+           .data[[time_col]] > 0)
 
-cat("After low-expression filtering:", nrow(expr_vst_filtered), "genes\n")
+  if (nrow(surv_data) < 50) {
+    stop("Too few samples for endpoint: ", time_col)
+  }
 
-## Filter low-variance genes
+  # Align expression to surviving patients
+  common_ids <- intersect(surv_data$Patient_ID, colnames(expr_vst))
+  surv_data <- surv_data[match(common_ids, surv_data$Patient_ID), ]
+  expr_surv <- expr_vst[, common_ids, drop = FALSE]
 
-vars <- rowVars(expr_vst_filtered)
-var_cutoff <- quantile(vars, 0.20)  # bottom 20% removed
+  stopifnot(all(colnames(expr_surv) == surv_data$Patient_ID))
 
-expr_vst_filtered <- expr_vst_filtered[vars > var_cutoff, ]
+  # filter genes based on survival patients
+  expr_threshold <- 1
+  min_samples <- round(0.20 * ncol(expr_surv))
 
-cat("After variance filtering:", nrow(expr_vst_filtered), "genes remain\n")
+  keep_expr <- rowSums(expr_surv > expr_threshold) >= min_samples
+  expr_surv <- expr_surv[keep_expr, ]
 
-## Keep only patients with valid OS info
+  # Filter low-variance genes
+  vars <- rowVars(expr_surv)
+  var_cutoff <- quantile(vars, 0.20)
+  expr_surv <- expr_surv[vars > var_cutoff, ]
 
-os_data <- clinical_filt %>%
-  filter(!is.na(Overall_Time),
-         !is.na(Overall_Status),
-         Overall_Time > 0)
+  message("Genes survived filtering: ", nrow(expr_surv))
 
-## Match filtered expression to OS patients
+  # Coz models
+  cox_list <- lapply(seq_len(nrow(expr_surv)), function(i) {
+    expr_vec <- expr_surv[i, ]
+    fit <- coxph(Surv(surv_data[[time_col]], surv_data[[status_col]]) ~ expr_vec)
+    s <- summary(fit)
 
-expr_os <- expr_vst_filtered[, rownames(os_data)]
-stopifnot(all(colnames(expr_os) == rownames(os_data)))
+    c(beta = s$coef[1, "coef"],
+      HR   = s$coef[1, "exp(coef)"],
+      pval = s$coef[1, "Pr(>|z|)"])
+  })
 
-## Run Cox model for each gene
+  cox_df <- as.data.frame(do.call(rbind, cox_list))
+  cox_df$ENSEMBL <- rownames(expr_surv)
+  cox_df$SYMBOL  <- get_gene_symbols(cox_df$ENSEMBL)
 
-cox_list <- lapply(seq_len(nrow(expr_os)), function(i) {
-  gene_expr <- expr_os[i, ]
+  cox_df$padj <- p.adjust(cox_df$pval, method = "BH")
 
-  fit <- coxph(Surv(Overall_Time, Overall_Status) ~ gene_expr, 
-               data = os_data)
+  cox_df <- cox_df %>%
+    filter(!is.infinite(beta), !is.na(beta), abs(beta) < 5)
 
-  s <- summary(fit)
+  return(list(cox = cox_df, surv_data = surv_data, expr = expr_surv))
+}
 
-  c(
-    beta = s$coef[1, "coef"],           # log(HR)
-    HR   = s$coef[1, "exp(coef)"],      # hazard ratio
-    pval = s$coef[1, "Pr(>|z|)"]
-  )
-})
 
-cox_mat <- do.call(rbind, cox_list)
-cox_df  <- as.data.frame(cox_mat)
+results_list <- list()
+for (ep in names(surv_endpoints)) { 
+  time_col <- surv_endpoints[[ep]][1] 
+  status_col <- surv_endpoints[[ep]][2] 
+  results_list[[ep]] <- run_survival_de(time_col, status_col, expr_vst, clinical_filt) 
+  }
 
-cox_df$ENSEMBL <- rownames(expr_os)
-cox_df$SYMBOL  <- get_gene_symbols(cox_df$ENSEMBL)
-
-cox_df$padj <- p.adjust(cox_df$pval, method = "BH")
-
-cox_df <- cox_df[order(cox_df$padj), ]
-
-head(cox_df)
-cox_df <- cox_df %>%
-  filter(!is.na(beta),
-         !is.infinite(beta),
-         abs(beta) < 5)    # remove extreme log(HR) values
 ```
 
 Visualization
 
 ```{r}
-## Volcano plot: log(HR) vs -log10(p)
-library(EnhancedVolcano)
+plot_volcano <- function(cox_df, title) {
+  cox_df$SYMBOL2 <- ifelse(grepl("^ENSG", cox_df$SYMBOL), "", cox_df$SYMBOL)
 
-cox_df$SYMBOL2 <- ifelse(grepl("^ENSG", cox_df$SYMBOL), "", cox_df$SYMBOL)
-
-# Use log(HR) (beta) as the x-axis
-EnhancedVolcano(
-  cox_df,
-  lab = cox_df$SYMBOL2,
-  x   = 'beta',        # log(HR)
-  y   = 'pval',
-  xlab = 'log(HR) (gene expression vs OS)',
-  ylab = '-log10(p-value)',
-  pCutoff = 0.05,
-  FCcutoff = 0,        # we’re not using a fold-change threshold
-  title = 'Gene-wise Cox analysis (Overall Survival)',
-  subtitle = 'VST expression, univariate Cox per gene'
-)
-```
-KM plot for top 6 survival genes
-
-```{r}
-top_n <- 6   # top 6 genes highlighted in the volcano
-
-# Get top survival genes 
-top_genes <- head(cox_df$ENSEMBL[order(cox_df$padj)], top_n)
-top_symbols <- get_gene_symbols(top_genes)
-
-top_genes
-top_symbols
-
-km_plots <- list()
-
-for (i in seq_along(top_genes)) {
-
-  gene_id <- top_genes[i]
-  gene_symbol <- top_symbols[i]
-
-  # Extract expression vector for this gene
-  expr_vec <- expr_vst[gene_id, ]
-
-  # OS dataset
-  os_data <- clinical_filt %>%
-    filter(!is.na(Overall_Time), !is.na(Overall_Status)) %>%
-    mutate(Expression = expr_vec[Patient_ID])   # <-- ensures correct alignment
-
-  # Check variance
-  if (length(unique(os_data$Expression)) < 5) {
-    message("Skipping ", gene_symbol, ": too few unique expression values.")
-    next
-  }
-
-  # Median split
-  med <- median(os_data$Expression, na.rm = TRUE)
-  os_data$Group <- ifelse(os_data$Expression >= med, "High", "Low")
-  os_data$Group <- factor(os_data$Group, levels = c("Low", "High"))
-
-  # Check if both groups exist
-  if (length(unique(os_data$Group)) < 2) {
-    message("Skipping ", gene_symbol, ": median split produced only one group.")
-    next
-  }
-
-  # Survival object
-  surv_obj <- Surv(os_data$Overall_Time, os_data$Overall_Status)
-
-  # Fit KM
-  fit <- survfit(surv_obj ~ Group, data = os_data)
-
-  # Plot
-  p <- ggsurvplot(
-    fit,
-    data = os_data,
-    risk.table = TRUE,
-    pval = TRUE,
-    conf.int = FALSE,
-    title = paste("Overall Survival by", gene_symbol, "expression"),
-    xlab = "Time (months)",
-    ylab = "Survival probability",
-    legend.title = gene_symbol,
-    legend.labs = c("Low Expression", "High Expression"),
-    palette = c("#1f78b4", "#e31a1c")
+  EnhancedVolcano(
+    cox_df,
+    lab = cox_df$SYMBOL2,
+    x = 'beta',
+    y = 'pval',
+    pCutoff = 0.05,
+    FCcutoff = 0,
+    title = title,
+    xlab = "log(HR)",
+    ylab = "-log10(p-value)"
   )
-
-  km_plots[[gene_symbol]] <- p
 }
 
-km_plots
+plot_volcano(results_list$OS$cox,  "Survival DE: OS")
+plot_volcano(results_list$DSS$cox, "Survival DE: DSS")
+plot_volcano(results_list$DFS$cox, "Survival DE: DFS")
+plot_volcano(results_list$PFS$cox, "Survival DE: PFS")
 
 ```
+KM plot for top survival genes
+
+```{r}
+
+plot_km_single <- function(cox_df, surv_data, expr_mat, time_col, status_col, title_prefix) {
+  
+  # Clean alignment first
+  aligned <- clean_survival_alignment(surv_data, expr_mat)
+  surv_data2 <- aligned$surv
+  expr_mat2  <- aligned$expr
+  
+  # Pick top gene
+  top_gene <- cox_df$ENSEMBL[which.min(cox_df$padj)]
+  symbol <- get_gene_symbols(top_gene)
+  
+  # Extract expression vector
+  expr_vec <- as.numeric(expr_mat2[top_gene, ])
+  stopifnot(length(expr_vec) == nrow(surv_data2))
+
+  df <- surv_data2 %>%
+    mutate(Expression = expr_vec)
+
+  # Median split
+  med <- median(df$Expression, na.rm = TRUE)
+  df$Group <- ifelse(df$Expression >= med, "High", "Low") |> factor()
+
+  fit <- survfit(Surv(df[[time_col]], df[[status_col]]) ~ Group, data=df)
+
+  ggsurvplot(
+    fit, data=df, pval=TRUE,
+    palette=c("#1f78b4", "#e31a1c"),
+    xlab="Time (months)", ylab="Survival probability",
+    title = paste0(title_prefix, " — ", symbol)
+  )
+}
+
+
+
+
+km_OS  <- plot_km_top_gene(results_list$OS$cox,  results_list$OS$surv_data,  results_list$OS$expr,  "Overall_Time", "Overall_Status", "OS")
+km_DSS <- plot_km_top_gene(results_list$DSS$cox, results_list$DSS$surv_data, results_list$DSS$expr, "DSS_Time",    "DSS_Status",    "DSS")
+km_DFS <- plot_km_top_gene(results_list$DFS$cox, results_list$DFS$surv_data, results_list$DFS$expr, "DFS_Time",    "DFS_Status",    "DFS")
+km_PFS <- plot_km_top_gene(results_list$PFS$cox, results_list$PFS$surv_data, results_list$PFS$expr, "PFS_Time",    "PFS_Status",    "PFS")
+
+km_OS; km_DSS; km_DFS; km_PFS
+
+```
+```{r}
+align_surv_expr <- function(surv_data, expr_mat) {
+  common_ids <- intersect(surv_data$Patient_ID, colnames(expr_mat))
+  
+  surv_aligned <- surv_data %>%
+    filter(Patient_ID %in% common_ids) %>%
+    arrange(match(Patient_ID, common_ids))
+  
+  expr_aligned <- expr_mat[, common_ids, drop = FALSE]
+  
+  stopifnot(nrow(surv_aligned) == ncol(expr_aligned))
+  list(surv = surv_aligned, expr = expr_aligned)
+}
+```
+
+```{r}
+# Extract top OS survival gene
+top_gene_OS <- results_list$OS$cox$ENSEMBL[which.min(results_list$OS$cox$padj)]
+symbol_OS <- get_gene_symbols(top_gene_OS)
+
+# Align data
+aligned_OS <- align_surv_expr(results_list$OS$surv_data, results_list$OS$expr)
+surv_OS <- aligned_OS$surv
+expr_OS <- aligned_OS$expr
+
+expr_vec_OS <- as.numeric(expr_OS[top_gene_OS, ])
+
+df_OS <- surv_OS %>% mutate(Expression = expr_vec_OS)
+
+# Median split
+med_OS <- median(df_OS$Expression, na.rm = TRUE)
+df_OS$Group <- ifelse(df_OS$Expression >= med_OS, "High", "Low") |> factor()
+
+fit_OS <- survfit(Surv(df_OS$Overall_Time, df_OS$Overall_Status) ~ Group, data=df_OS)
+
+ggsurvplot(
+  fit_OS, data=df_OS, pval=TRUE,
+  palette=c("#1f78b4","#e31a1c"),
+  title=paste("OS by", symbol_OS, "Expression")
+)
+```
+```{r}
+valid <- results_list$DSS$cox$ENSEMBL[
+  order(results_list$DSS$cox$padj)
+]
+
+for (g in valid) {
+
+  vec <- expr_DSS[g, ]
+
+  # remove NA values
+  vec <- vec[!is.na(vec)]
+  if (length(vec) == 0) next
+
+  # safely compute median
+  med <- median(vec, na.rm = TRUE)
+  if (is.na(med)) next
+
+  # create split
+  grp <- vec >= med
+  if (any(is.na(grp))) next
+
+  # count groups
+  tb <- table(grp)
+
+  # need both groups to have >20 samples
+  if (length(unique(vec)) > 3 && length(tb) == 2 &&
+      tb[1] > 20 && tb[2] > 20) {
+
+    good_gene <- g
+    break
+  }
+}
+
+
+good_gene
+symbol_DSS <-get_gene_symbols(good_gene)
+
+aligned_DSS <- align_surv_expr(results_list$DSS$surv_data, results_list$DSS$expr)
+surv_DSS <- aligned_DSS$surv
+expr_DSS <- aligned_DSS$expr
+
+expr_vec_DSS <- as.numeric(expr_DSS[good_gene, ])
+df_DSS <- surv_DSS %>% mutate(Expression = expr_vec_DSS)
+
+med_DSS <- median(df_DSS$Expression, na.rm = TRUE)
+df_DSS$Group <- ifelse(df_DSS$Expression >= med_DSS, "High", "Low") |> factor()
+
+fit_DSS <- survfit(Surv(df_DSS$DSS_Time, df_DSS$DSS_Status) ~ Group, data=df_DSS)
+
+ggsurvplot(
+  fit_DSS, data=df_DSS, pval=TRUE,
+  palette=c("#1f78b4","#e31a1c"),
+  title=paste("DSS by", symbol_DSS, "Expression")
+)
+```
+
+```{r}
+top_gene_DFS <- results_list$DFS$cox$ENSEMBL[which.min(results_list$DFS$cox$padj)]
+symbol_DFS <- get_gene_symbols(top_gene_DFS)
+
+aligned_DFS <- align_surv_expr(results_list$DFS$surv_data, results_list$DFS$expr)
+surv_DFS <- aligned_DFS$surv
+expr_DFS <- aligned_DFS$expr
+
+expr_vec_DFS <- as.numeric(expr_DFS[top_gene_DFS, ])
+df_DFS <- surv_DFS %>% mutate(Expression = expr_vec_DFS)
+
+med_DFS <- median(df_DFS$Expression, na.rm = TRUE)
+df_DFS$Group <- ifelse(df_DFS$Expression >= med_DFS, "High", "Low") |> factor()
+
+fit_DFS <- survfit(Surv(df_DFS$DFS_Time, df_DFS$DFS_Status) ~ Group, data=df_DFS)
+
+ggsurvplot(
+  fit_DFS, data=df_DFS, pval=TRUE,
+  palette=c("#1f78b4","#e31a1c"),
+  title=paste("DFS by", symbol_DFS, "Expression")
+)
+```
+
+
+```{r}
+top_gene_PFS <- results_list$PFS$cox$ENSEMBL[which.min(results_list$PFS$cox$padj)]
+symbol_PFS <- get_gene_symbols(top_gene_PFS)
+
+aligned_PFS <- align_surv_expr(results_list$PFS$surv_data, results_list$PFS$expr)
+surv_PFS <- aligned_PFS$surv
+expr_PFS <- aligned_PFS$expr
+
+expr_vec_PFS <- as.numeric(expr_PFS[top_gene_PFS, ])
+df_PFS <- surv_PFS %>% mutate(Expression = expr_vec_PFS)
+
+med_PFS <- median(df_PFS$Expression, na.rm = TRUE)
+df_PFS$Group <- ifelse(df_PFS$Expression >= med_PFS, "High", "Low") |> factor()
+
+fit_PFS <- survfit(Surv(df_PFS$PFS_Time, df_PFS$PFS_Status) ~ Group, data=df_PFS)
+
+ggsurvplot(
+  fit_PFS, data=df_PFS, pval=TRUE,
+  palette=c("#1f78b4","#e31a1c"),
+  title=paste("PFS by", symbol_PFS, "Expression")
+)
+```
+
+
+
+
+
 
 
 ## Section 20
@@ -899,10 +1100,6 @@ EnhancedVolcano(
 )
 
 ```
-
-
-
-
 
 
 
