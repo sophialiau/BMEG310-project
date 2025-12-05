@@ -18,10 +18,21 @@ library(e1071)
 library(purrr)
 library(survival)
 library(survminer)
+
+## added new ones!
 library(DESeq2)
 library(pheatmap)
+library(msigdbr)
+library(fgsea)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
 
-library(pheatmap)
+library(matrixStats)
+library(EnhancedVolcano)
+library(ashr)
+library(patchwork)
+library(magrittr)
+
 ```
 
 
@@ -94,6 +105,8 @@ dds  <- dds[keep, ]
 dds <- estimateSizeFactors(dds)
 norm_counts <- counts(dds, normalized = TRUE)
 
+# look into log (for image making just for heat map) & z-square (okay)
+
 # Variance stabilized transform (for downstream analysis such as clustering)
 vsd <- vst(dds, blind = TRUE)
 expr_vst <- assay(vsd)
@@ -104,4 +117,219 @@ expr_vst[1:5, 1:5]
 # random note for commit sake
 
 ```
+### MINH'S SECTION
+
+```{r}
+### SECTION 4: Expression-based clustering ###
+
+# 1. Select highly variable genes
+var_genes <- rowVars(expr_vst)
+hvg_index <- order(var_genes, decreasing = TRUE)[1:500]   # top 500 HVGs
+hvg_mat <- expr_vst[hvg_index, ]
+
+# 2. Distance and hierarchical clustering
+dist_samples <- dist(t(hvg_mat))  
+hc <- hclust(dist_samples, method = "ward.D2")
+
+plot(hc, labels = FALSE,
+     main = "Hierarchical clustering of LIHC (top 500 HVGs)")
+
+# Choose number of clusters
+k <- 4
+Expression_Cluster <- cutree(hc, k = k)
+Expression_Cluster <- factor(Expression_Cluster)
+names(Expression_Cluster) <- colnames(hvg_mat)
+
+table(Expression_Cluster)
+
+# 3. Attach cluster labels to clinical_filt
+expr_cluster_df <- data.frame(
+  Patient_ID         = names(Expression_Cluster),
+  Expression_Cluster = Expression_Cluster,
+  stringsAsFactors   = FALSE
+)
+
+# clinical_filt rownames are PATIENT_IDs already
+clinical_filt <- clinical_filt[match(expr_cluster_df$Patient_ID,
+                                     rownames(clinical_filt)), ]
+stopifnot(all(rownames(clinical_filt) == expr_cluster_df$Patient_ID))
+
+clinical_filt$Expression_Cluster <- expr_cluster_df$Expression_Cluster
+
+```
+
+```{r}
+### SECTION 5: Differential Expression between Expression Clusters ###
+
+# Align counts with cluster-labelled clinical data
+expr_mat_sub <- expr_filt[, rownames(clinical_filt)]
+stopifnot(all(colnames(expr_mat_sub) == rownames(clinical_filt)))
+
+dds_clusters <- DESeqDataSetFromMatrix(
+  countData = expr_mat_sub,
+  colData   = clinical_filt,
+  design    = ~ Expression_Cluster
+)
+
+keep <- rowSums(counts(dds_clusters)) >= 10
+dds_clusters <- dds_clusters[keep, ]
+
+dds_clusters <- DESeq(dds_clusters)
+
+# helper: map ENSG -> SYMBOL
+get_gene_symbols <- function(ens_ids) {
+  ens_clean <- sub("\\..*", "", ens_ids)
+  symbol_map <- mapIds(
+    org.Hs.eg.db,
+    keys     = ens_clean,
+    keytype  = "ENSEMBL",
+    column   = "SYMBOL",
+    multiVals = "first"
+  )
+  symbol_map[is.na(symbol_map)] <- ens_ids[is.na(symbol_map)]
+  unname(symbol_map)
+}
+
+# Example: Cluster 2 vs 1
+res_2v1 <- results(dds_clusters, contrast = c("Expression_Cluster", "2", "1"))
+res_2v1 <- lfcShrink(dds_clusters, contrast = c("Expression_Cluster","2","1"),
+                     type = "ashr")
+res_2v1 <- as.data.frame(res_2v1)
+res_2v1$ENSEMBL <- rownames(res_2v1)
+res_2v1$SYMBOL  <- get_gene_symbols(res_2v1$ENSEMBL)
+
+head(res_2v1)
+
+```
+
+```{r}
+# make sure these are loaded somewhere near the top
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+# helper to map ENSEMBL → SYMBOL
+get_gene_symbols <- function(ens_ids) {
+  ens_clean <- sub("\\..*", "", ens_ids)  # drop version (.13 etc)
+
+  symbol_map <- AnnotationDbi::mapIds(
+    org.Hs.eg.db,
+    keys     = ens_clean,
+    keytype  = "ENSEMBL",
+    column   = "SYMBOL",
+    multiVals = "first"
+  )
+
+  # if no symbol, just keep the original ID so nothing breaks
+  symbol_map[is.na(symbol_map)] <- ens_ids[is.na(symbol_map)]
+  unname(symbol_map)
+}
+
+# make sure res_2v1 is a data.frame and attach IDs
+res_2v1 <- as.data.frame(res_2v1)
+res_2v1$ENSEMBL <- rownames(res_2v1)
+res_2v1$SYMBOL  <- get_gene_symbols(res_2v1$ENSEMBL)
+
+# quick sanity check
+head(res_2v1[, c("ENSEMBL", "SYMBOL", "log2FoldChange", "pvalue")])
+
+```
+
+```{r}
+# Filter result table to usable genes
+res_clust <- res_2v1 %>%
+  dplyr::filter(
+    !is.na(SYMBOL),
+    !grepl("^ENSG", SYMBOL),
+    !is.na(log2FoldChange)
+  )
+
+# Named stats vector: log2FC, names = SYMBOL
+stats <- res_clust$log2FoldChange
+names(stats) <- res_clust$SYMBOL
+
+# collapse duplicates: keep gene with largest |log2FC|
+stats <- tapply(stats, names(stats), function(x) x[which.max(abs(x))])
+
+# back to plain numeric vector
+stats <- unlist(stats)
+
+# rank descending
+stats <- sort(stats, decreasing = TRUE)
+
+head(stats)
+
+```
+
+
+### SECTION X: Pathway Analysis Set Up
+
+```{r}
+### SECTION 6: Hallmark GSEA for Cluster 2 vs 1 ###
+
+# Load Hallmark gene sets
+hallmark_df <- msigdbr(
+  species  = "Homo sapiens",
+  category = "H"
+)
+hallmark_paths <- split(hallmark_df$gene_symbol,
+                        hallmark_df$gs_name)
+
+# Prepare ranked stats (log2FC) using SYMBOL
+res_clust <- res_2v1 %>%
+  filter(!is.na(SYMBOL),
+         !grepl("^ENSG", SYMBOL),
+         !is.na(log2FoldChange))
+
+stats <- res_clust$log2FoldChange
+names(stats) <- res_clust$SYMBOL
+
+# collapse duplicates: keep gene with largest |log2FC|
+stats <- tapply(stats, names(stats), function(x) x[which.max(abs(x))])
+stats <- unlist(stats)
+stats <- sort(stats, decreasing = TRUE)
+
+set.seed(310)
+fgsea_2v1 <- fgsea(
+  pathways = hallmark_paths,
+  stats    = stats,
+  nperm    = 10000
+)
+
+fgsea_2v1 <- fgsea_2v1[order(fgsea_2v1$padj), ]
+head(fgsea_2v1, 10)
+
+```
+
+```{r}
+plot_fgsea_bar <- function(fg_res, title, n = 10, direction = c("up", "down")) {
+  direction <- match.arg(direction)
+  
+  if (direction == "up") {
+    df <- fg_res %>% filter(NES > 0, padj < 0.05) %>% head(n)
+  } else {
+    df <- fg_res %>% filter(NES < 0, padj < 0.05) %>% head(n)
+  }
+  
+  if (nrow(df) == 0) {
+    message("No significant ", direction, " pathways for: ", title)
+    return(NULL)
+  }
+  
+  ggplot(df, aes(x = reorder(pathway, NES), y = NES)) +
+    geom_col() +
+    coord_flip() +
+    labs(title = title,
+         x = "Hallmark pathway",
+         y = "NES") +
+    theme_minimal(base_size = 10)
+}
+
+p_2v1_up   <- plot_fgsea_bar(fgsea_2v1, "Cluster 2 vs 1 – upregulated pathways",   "up")
+p_2v1_down <- plot_fgsea_bar(fgsea_2v1, "Cluster 2 vs 1 – downregulated pathways", "down")
+
+p_2v1_up
+p_2v1_down
+
+```
+
 
