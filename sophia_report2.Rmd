@@ -301,35 +301,70 @@ head(fgsea_2v1, 10)
 ```
 
 ```{r}
-plot_fgsea_bar <- function(fg_res, title, n = 10, direction = c("up", "down")) {
-  direction <- match.arg(direction)
-  
-  if (direction == "up") {
-    df <- fg_res %>% filter(NES > 0, padj < 0.05) %>% head(n)
-  } else {
-    df <- fg_res %>% filter(NES < 0, padj < 0.05) %>% head(n)
-  }
-  
-  if (nrow(df) == 0) {
-    message("No significant ", direction, " pathways for: ", title)
-    return(NULL)
-  }
-  
-  ggplot(df, aes(x = reorder(pathway, NES), y = NES)) +
-    geom_col() +
-    coord_flip() +
-    labs(title = title,
-         x = "Hallmark pathway",
-         y = "NES") +
-    theme_minimal(base_size = 10)
-}
+# Filter significant pathways and order by NES
+fg_sig <- fgsea_2v1 %>%
+  dplyr::filter(padj < 0.05) %>%
+  dplyr::mutate(direction = ifelse(NES > 0, "Up in Cluster 2", "Down in Cluster 2")) %>%
+  dplyr::arrange(NES)
 
-p_2v1_up   <- plot_fgsea_bar(fgsea_2v1, "Cluster 2 vs 1 – upregulated pathways",   "up")
-p_2v1_down <- plot_fgsea_bar(fgsea_2v1, "Cluster 2 vs 1 – downregulated pathways", "down")
+ggplot(fg_sig,
+       aes(x = reorder(pathway, NES),
+           y = NES,
+           fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Cluster 2 vs 1 – Hallmark Pathway Enrichment",
+    x     = "Hallmark Pathway",
+    y     = "NES"
+  ) +
+  scale_fill_manual(values = c("Up in Cluster 2" = "#1f78b4",
+                               "Down in Cluster 2" = "#e31a1c")) +
+  theme_minimal(base_size = 10)
 
-p_2v1_up
-p_2v1_down
+summary(fgsea_2v1$NES)
+table(sign(fgsea_2v1$NES[fgsea_2v1$padj < 0.05]))
 
 ```
 
+```{r}
+library(igraph)
+library(dplyr)
+library(tidyr)
+library(ggraph)
+library(ggforce)
+
+# pick 3 significant pathways (NES > 0, strong upregulated signals)
+sig_paths <- fgsea_2v1 %>%
+  filter(padj < 0.05, NES > 0) %>%
+  arrange(padj) %>%
+  slice(1:3)   # CHANGE if you want more pathways
+
+# build edge list only for leading-edge genes
+edge_df <- sig_paths %>%
+  select(pathway, leadingEdge) %>%
+  unnest(cols = leadingEdge) %>%
+  rename(gene = leadingEdge)
+
+# build graph object
+g <- graph_from_data_frame(edge_df, directed = FALSE)
+
+# identify node types
+V(g)$type <- ifelse(V(g)$name %in% sig_paths$pathway, "pathway", "gene")
+
+# pretty plot
+ggraph(g, layout = "fr") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = type, size = type)) +
+  geom_node_text(
+    aes(label = name, color = type),
+    repel = TRUE,
+    size = 3
+  ) +
+  scale_color_manual(values = c("pathway" = "#E76F51", "gene" = "#2A9D8F")) +
+  scale_size_manual(values = c("pathway" = 8, "gene" = 3)) +
+  theme_void() +
+  labs(title = "Pathway–Gene Network: Upregulated in Cluster 2")
+
+```
 
