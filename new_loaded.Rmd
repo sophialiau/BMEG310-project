@@ -1,7 +1,10 @@
 ---
-title: "setup for everyones report"
-output: html_document
+title: "new_loaded"
+output:
+  pdf_document:
+    latex_engine: xelatex
 ---
+
 
 ### SECTION 1: Libraries
 
@@ -43,6 +46,7 @@ library(tidyr)
 library(tibble)
 library(purrr)
 library(e1071)
+library(EnhancedVolcano)
 ```
 
 ### SECTION 2: Loading Data
@@ -1640,3 +1644,144 @@ EnhancedVolcano(
 )
 ```
 
+### SECTION 41: Libraries ### 
+
+
+```{r}
+#loaded Libraries 
+
+library(dplyr)
+library(readr)
+library(tibble)
+library(ggplot2)
+library(tidyr)
+library(e1071)
+library(purrr)
+library(survival)
+library(survminer)
+
+## added new ones!
+library(DESeq2)
+library(pheatmap)
+library(msigdbr)
+library(fgsea)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+library(matrixStats)
+library(EnhancedVolcano)
+library(ashr)
+library(patchwork)
+library(magrittr)
+
+```
+
+
+### SECTION x: Pathway Analysis Set Up
+
+```{r}
+### SECTION 6: Hallmark GSEA for Cluster 2 vs 1 ###
+
+# Load Hallmark gene sets
+hallmark_df <- msigdbr(
+  species  = "Homo sapiens",
+  category = "H"
+)
+hallmark_paths <- split(hallmark_df$gene_symbol,
+                        hallmark_df$gs_name)
+
+# Prepare ranked stats (log2FC) using SYMBOL
+res_clust <- res_1v2 %>%
+  filter(!is.na(SYMBOL),
+         !grepl("^ENSG", SYMBOL),
+         !is.na(log2FoldChange))
+
+stats <- res_clust$log2FoldChange
+names(stats) <- res_clust$SYMBOL
+
+# collapse duplicates: keep gene with largest |log2FC|
+stats <- tapply(stats, names(stats), function(x) x[which.max(abs(x))])
+stats <- unlist(stats)
+stats <- sort(stats, decreasing = TRUE)
+
+set.seed(310)
+fgsea_1v2 <- fgsea(
+  pathways = hallmark_paths,
+  stats    = stats,
+  nperm    = 10000
+)
+
+fgsea_1v2 <- fgsea_1v2[order(fgsea_1v2$padj), ]
+head(fgsea_1v2, 10)
+
+```
+
+
+```{r}
+# Filter significant pathways and order by NES
+fg_sig <- fgsea_1v2 %>%
+  dplyr::filter(padj < 0.05) %>%
+  dplyr::mutate(direction = ifelse(NES > 0, "Up in Cluster 2", "Down in Cluster 2")) %>%
+  dplyr::arrange(NES)
+
+ggplot(fg_sig,
+       aes(x = reorder(pathway, NES),
+           y = NES,
+           fill = direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Cluster 2 vs 1 – Hallmark Pathway Enrichment",
+    x     = "Hallmark Pathway",
+    y     = "NES"
+  ) +
+  scale_fill_manual(values = c("Up in Cluster 2" = "#1f78b4",
+                               "Down in Cluster 2" = "#e31a1c")) +
+  theme_minimal(base_size = 10)
+
+summary(fgsea_1v2$NES)
+table(sign(fgsea_1v2$NES[fgsea_1v2$padj < 0.05]))
+
+```
+
+
+```{r}
+library(igraph)
+library(dplyr)
+library(tidyr)
+library(ggraph)
+library(ggforce)
+
+sig_paths <- fgsea_1v2 %>%
+  as_tibble() %>%                               # make sure it's a plain tibble
+  dplyr::filter(padj < 0.05, NES > 0) %>%       # use dplyr filter
+  dplyr::arrange(padj) %>%                      # order by padj
+  dplyr::slice(1:3)                             # top 3
+
+# build edge list only for leading-edge genes
+edge_df <- sig_paths %>%
+  dplyr::select(pathway, leadingEdge) %>%
+  tidyr::unnest(cols = leadingEdge) %>%
+  dplyr::rename(gene = leadingEdge)
+
+# build graph object
+g <- graph_from_data_frame(edge_df, directed = FALSE)
+
+# identify node types
+V(g)$type <- ifelse(V(g)$name %in% sig_paths$pathway, "pathway", "gene")
+
+# pretty plot
+ggraph(g, layout = "fr") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = type, size = type)) +
+  geom_node_text(
+    aes(label = name, color = type),
+    repel = TRUE,
+    size = 3
+  ) +
+  scale_color_manual(values = c("pathway" = "#E76F51", "gene" = "#2A9D8F")) +
+  scale_size_manual(values = c("pathway" = 8, "gene" = 3)) +
+  theme_void() +
+  labs(title = "Pathway–Gene Network: Upregulated in Cluster 2")
+
+```
