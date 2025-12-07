@@ -28,22 +28,21 @@ output: html_document
 
 library(dplyr)
 library(readr)
-library(tibble)
 library(ggplot2)
 library(tidyr)
 library(e1071)
 library(purrr)
 library(survival)
 library(survminer)
-
-
 library(AnnotationDbi)
 library(org.Hs.eg.db)
-
 library(DESeq2)
 library(pheatmap)
-
-library(pheatmap)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(purrr)
+library(e1071)
 ```
 
 ### SECTION 2: Loading Data
@@ -162,14 +161,6 @@ var_explained_percent <- round(var_explained * 100, 2)
 
 var_explained_percent[1:5]   
 
-
-pca_res$
-
-```
-
-PCA is useful in RNA-seq expression analysis because gene expression data are high-dimensional and continuous, with thousands of genes varying across samples. PCA reduces this complexity by identifying the major axes of variation that summarize overall biological patterns, such as immune activity, tumor purity, or cell-cycle programs, and helps reveal whether clinical factors (like early vs late cancer stage) naturally separate in the data. However, this same approach does not make sense for the mutation dataset, because mutation matrices are extremely sparse and binary—most genes are unmutated in most patients, producing almost all zeros with no continuous gradients of variation. Without meaningful covariance or continuous structure, PCA cannot extract biologically relevant components from mutation data. In short, PCA works well for continuous gene expression matrices but is not appropriate for sparse 0/1 mutation profiles.
-
-```{r}
 # Loadings for PC1    chat generated 
 pc1_loadings <- pca_res$rotation[, 1]  
 pc1_abs <- abs(pc1_loadings)
@@ -177,7 +168,9 @@ top10_genes_pc1 <- names(sort(pc1_abs, decreasing = TRUE))[1:10]
 top10_genes_pc1_symbols <- get_gene_symbols(top10_genes_pc1)
 top10_genes_pc1_symbols
 
-```  
+```
+
+PCA is useful in RNA-seq expression analysis because gene expression data are high-dimensional and continuous, with thousands of genes varying across samples. PCA reduces this complexity by identifying the major axes of variation that summarize overall biological patterns, such as immune activity, tumor purity, or cell-cycle programs, and helps reveal whether clinical factors (like early vs late cancer stage) naturally separate in the data. However, this same approach does not make sense for the mutation dataset, because mutation matrices are extremely sparse and binary—most genes are unmutated in most patients, producing almost all zeros with no continuous gradients of variation. Without meaningful covariance or continuous structure, PCA cannot extract biologically relevant components from mutation data. In short, PCA works well for continuous gene expression matrices but is not appropriate for sparse 0/1 mutation profiles.
 
 
 
@@ -189,7 +182,7 @@ hypothesis: The genes with the most varaince will likley have an impact on cance
 
 use PCA1-PCAn to do analysis like clustering - then when we want to do analysis we can look at the top genes that make up each pca to see what genes supply the most variance
 
-
+### SECTION 6   ###
 
 ```{r}
 # Scree plot
@@ -203,10 +196,11 @@ ggplot(df_scree[1:9, ], aes(x = PC, y = Variance)) +
   geom_text(aes(label = Variance), vjust = -0.3) +
   theme_minimal() +
   ylab("% Variance Explained") +
-  ggtitle("Scree Plot: PCA Variance Explained")
+  ggtitle("PCA Variance Explained")
 
 ```
   
+### SECTION 7   ###
 
 
 
@@ -227,6 +221,7 @@ AWSOME: clearly from ths out top gene DOES affect cancer so we should be able to
 
 The GSTM1 gene is crucial for the detoxification of xenobiotics, carcinogens, and oxidative stress products. It is primarily located in the liver and can be present or absent, with the presence of at least one copy indicating a functional gene. The absence of GSTM1 can lead to a reduced detoxification capacity, increasing the risk of chronic diseases such as cancer, chemical sensitivity, and atopic asthma. To mitigate these risks, dietary changes such as consuming cruciferous vegetables and allium foods can be beneficial.
 
+### SECTION 8  ###
 
 
 ```{r}
@@ -243,25 +238,31 @@ ggplot(df_influence,
   ggtitle("Weighted Influence Scores Across All PCs")
 
 ```
+### SECTION 9   ###
 
 ```{r}
 top20_loadings <- loadings[names(top_genes), 1:10]
-
 pheatmap(top20_loadings,
          cluster_cols = TRUE,
          cluster_rows = TRUE,
          main = "Loadings of Top Influential Genes (PC1–PC10)")
 
 ```
-```{r}
-pc_scores <- pca_res$x[,1:10]
+### SECTION 10   ###
 
-pheatmap(t(pc_scores),
-         main = "PC Score Heatmap (Samples × PCs)",
-         cluster_cols = TRUE,
-         cluster_rows = TRUE)
+```{r}
+pc_cor <- cor(pc_scores)
+
+pheatmap(pc_cor,
+         main = "Correlation Between PCs 1–10",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE)
 
 ```
+
+
+### SECTION 11   ###
+
 
 ```{r}
 var_genes <- order(rowVars(expr_vst), decreasing = TRUE)[1:500]
@@ -274,6 +275,7 @@ pheatmap(cor_mat,
 
 ```
 
+### SECTION 12   ###
 
 
 ```{r}
@@ -349,6 +351,7 @@ write.table(
 gene_diff_tbl
 
 ```
+### SECTION 13   ###
 
 
 ```{r}
@@ -373,23 +376,12 @@ gene_diff_ranked
 
 
 
+### SECTION 14   ###
 
 
 cancer stuff
 
 
-
-```{r}
-
-library(dplyr)
-library(tidyr)
-library(readr)
-library(ggplot2)
-library(tibble)
-library(purrr)
-library(e1071)
-
-```
 
 
 ```{r}
@@ -439,7 +431,7 @@ head(clinical_stage)
 
 ```
 
-
+### SECTION 15   ###
 
 ```{r}
 # Convert PCA scores to a data frame
@@ -455,14 +447,18 @@ head(pca_stage)
 
 ```
 
+### SECTION 16   ###
+
 ```{r}
 pc_nums <- paste0("PC", 1:6)
 
 pca_long <- pca_stage %>%
-  select(PATIENT_ID, Stage_binary_2, all_of(pc_nums)) %>%
-  pivot_longer(cols = all_of(pc_nums),
-               names_to = "PC",
-               values_to = "Score")
+  dplyr::select(PATIENT_ID, Stage_binary_2, all_of(pc_nums)) %>% 
+  tidyr::pivot_longer(
+    cols = all_of(pc_nums),
+    names_to = "PC",
+    values_to = "Score"
+  )
 
 ggplot(pca_long, aes(x = PC, y = Score, fill = Stage_binary_2)) +
   geom_boxplot(alpha = 0.6) +
@@ -471,7 +467,9 @@ ggplot(pca_long, aes(x = PC, y = Score, fill = Stage_binary_2)) +
   ylab("PC Score") +
   xlab("Principal Component")
 
+
 ```
+### SECTION 17   ###
 ```{r}
 
 library(AnnotationDbi)
@@ -485,7 +483,7 @@ top6_pc1_symbols <- get_gene_symbols(top6_pc1_genes)
 top6_pc1_symbols
 
 ```
-
+### SECTION 18   ###
 ```{r}
 expr_df <- as.data.frame(t(expr_vst))
 expr_df$PATIENT_ID <- rownames(expr_df)
@@ -505,6 +503,9 @@ expr_stage_long <- expr_stage %>%
 expr_stage_long$Gene <- get_gene_symbols(expr_stage_long$Gene)
 
 ```
+
+### SECTION 19   ###
+
 ```{r}
 ggplot(expr_stage_long, aes(x = Gene, y = Expression, fill = Stage_binary_2)) +
   geom_boxplot(alpha = 0.7) +
@@ -513,7 +514,7 @@ ggplot(expr_stage_long, aes(x = Gene, y = Expression, fill = Stage_binary_2)) +
   ggtitle("Expression of Top 6 PCA-Driving Genes (Early vs Late)") +
   ylab("VST-Normalized Expression")
 ```
-
+### SECTION 20   ###
 
 ```{r}
 
@@ -543,48 +544,64 @@ expr_diff_vec <- as.numeric(late_expr[1, ] - early_expr[1, ])
 
 ```
 
-
+### SECTION 21   ###
 
 ```{r}
 
+# ---------------------------------------------------------
+# CLEAN EXPRESSION DIFFERENCE PIPELINE (FIXED VERSION)
+# ---------------------------------------------------------
 
+# 1. Create expression dataframe with patient IDs
+expr_df <- as.data.frame(t(expr_vst))
+expr_df$PATIENT_ID <- rownames(expr_df)
 
-# Ensure column vectors are proper atomic types
-genes_expr    <- as.character(genes_expr)
-expr_diff_vec <- as.numeric(expr_diff_vec)
+# 2. Merge with clinical stage data
+expr_stage <- expr_df %>%
+  dplyr::inner_join(clinical_stage, by = "PATIENT_ID") %>%
+  dplyr::filter(!is.na(Stage_binary_2))
 
-# Build clean tibble
-expr_diff_tbl <- tibble::tibble(
+expr_stage_mean <- expr_stage %>%
+  dplyr::group_by(Stage_binary_2) %>%
+  dplyr::summarise(across(where(is.numeric), mean), .groups = "drop")    #NOTE to TAs: This part does work - however it is comparing ALL of the genes so it takes a very long time, if you have to run the code I am sorry 
+
+# Extract gene names AFTER summarising
+genes_expr <- setdiff(colnames(expr_stage_mean), "Stage_binary_2")
+
+# 4. Separate early and late groups
+early_expr <- expr_stage_mean %>%
+  dplyr::filter(Stage_binary_2 == "Early Stages") %>%
+  dplyr::select(all_of(genes_expr))
+
+late_expr <- expr_stage_mean %>%
+  dplyr::filter(Stage_binary_2 == "Late Stages") %>%
+  dplyr::select(all_of(genes_expr))
+
+# 5. Compute difference (Late – Early)
+expr_diff_vec <- as.numeric(late_expr[1, ] - early_expr[1, ])
+
+# 6. Build ranked table
+expr_diff_tbl <- tibble(
   Gene     = genes_expr,
   Diff     = expr_diff_vec,
   Abs_Diff = abs(expr_diff_vec)
 ) %>%
   dplyr::arrange(desc(Abs_Diff))
 
-# Extract top 20 differentiating genes
+# 7. Extract top 20 and convert to gene symbols
 top20_expr_diff <- expr_diff_tbl %>%
   dplyr::slice(1:20)
 
 top20_expr_diff$Gene_symbol <- get_gene_symbols(top20_expr_diff$Gene)
 
-# Remove Stage_num row manually
-top20_expr_diff <- top20_expr_diff %>%
-  dplyr::filter(Gene != "Stage_num")
-
-# Show table
+# 8. Display result
 top20_expr_diff
 
-# Save table (optional)
-write.table(
-  top20_expr_diff,
-  file = "top20_expression_stage_differences.csv",
-  sep = ",",
-  row.names = FALSE
-)
+
 ```
 
 
-
+### SECTION 22   ###
 
 
 ```{r}
@@ -615,7 +632,7 @@ p1 <- ggplot(pca_expr_bar_df,
   theme_minimal(base_size = 14) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   labs(
-    title = "Top 6 PCA-Driving Genes (Mean Expression)",
+    title = "Data from PCA",
     y = "VST-Normalized Expression",
     x = "Gene",
     fill = "Stage"
@@ -647,7 +664,7 @@ p2 <- ggplot(expr_bar_df,
   theme_minimal(base_size = 14) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   labs(
-    title = "Top 6 Expression-Differentiating Genes",
+    title = "Data from Expression-Differentiatig",
     y = "VST-Normalized Expression",
     x = "Gene",
     fill = "Stage"
@@ -663,22 +680,21 @@ p1 + p2
 
 ```
 
-
+### SECTION 23   ###
 
 
 ```{r}
 
-
-# Cumulative variance
 cum_var <- cumsum(var_explained)
-
-# Number of PCs needed to reach 80%
+#changed to 65 precent after testing
 num_pcs_80 <- which(cum_var >= 0.65)[1]
 
 num_pcs_80
 
 
 ```
+### SECTION 24   ###
+
 ```{r}
   # -------------------------------------------------------------
   #  modle 1 pca 
@@ -732,7 +748,7 @@ num_pcs_80
   caret::confusionMatrix(test_pred, test_data$Stage_binary_2)
   
 ```
-
+### SECTION 25   ###
 
 ```{r}
 top100_expr_genes <- expr_diff_tbl$Gene[1:100]
@@ -753,7 +769,7 @@ expr_bar_df <- expr_bar_df %>%
   dplyr::filter(Gene != "Stage_num")
 ```
 
-
+### SECTION 26   ###
 
 ```{r}
 library(caret)
@@ -769,9 +785,13 @@ expr_stage <- expr_df %>%
   inner_join(clinical_stage, by = "PATIENT_ID") %>%
   filter(!is.na(Stage_binary_2))
 
-# Use your selected 7 genes
-selected_genes <- top100_expr_genes   # already defined
+# Remove Stage_num so it never becomes a predictor
+expr_stage <- expr_stage %>% dplyr::select(-Stage_num)
 
+# REMOVE Stage_num from the selected gene list if it is there
+selected_genes <- setdiff(top100_expr_genes, "Stage_num")
+
+# Build modelling dataframe
 model_expr <- expr_stage %>%
   dplyr::select(all_of(selected_genes), Stage_binary_2)
 
@@ -794,7 +814,6 @@ test_expr  <- model_expr[-train_idx_expr, ]
 
 # --------------------------------------------
 # 3. Weighted logistic regression
-# (bias the classifier toward Late Stage)
 # --------------------------------------------
 logit_expr <- glm(
   Stage_binary_2 ~ .,
@@ -808,7 +827,6 @@ logit_expr <- glm(
 # --------------------------------------------
 test_prob_expr <- predict(logit_expr, newdata = test_expr, type = "response")
 
-# Default threshold = 0.5 (you can lower it later)
 test_pred_expr <- ifelse(test_prob_expr > 0.5, "Late Stages", "Early Stages")
 test_pred_expr <- factor(test_pred_expr, levels = c("Early Stages", "Late Stages"))
 
@@ -818,7 +836,7 @@ test_pred_expr <- factor(test_pred_expr, levels = c("Early Stages", "Late Stages
 caret::confusionMatrix(test_pred_expr, test_expr$Stage_binary_2)
 
 ```
-
+### SECTION 27   ###
 ```{r}
 library(caret)
 library(dplyr)
@@ -829,7 +847,7 @@ run_pca_model <- function(seed) {
 
   # TRAIN/TEST SPLIT
   idx <- caret::createDataPartition(
-    model_df$Stage_binary_2, p = 0.8, list = FALSE
+    model_df$Stage_binary_2, p = 0.75, list = FALSE
   )
   train_data <- model_df[idx, ]
   test_data  <- model_df[-idx, ]
@@ -855,7 +873,8 @@ logit_model <- glm(
   return(list(
     accuracy = cm$overall["Accuracy"],
     sensitivity = cm$byClass["Sensitivity"],
-    specificity = cm$byClass["Specificity"]
+    specificity = cm$byClass["Specificity"],
+    precision = cm$byClass["Precision"]
   ))
 }
 
@@ -870,8 +889,9 @@ pca_mean
 
 
 ```
-```{r}
 
+### SECTION 28   ###
+```{r}
 options(warn = -1)
 
 library(caret)
@@ -881,46 +901,52 @@ run_expr_model <- function(seed) {
 
   set.seed(seed)
 
+  # Make absolutely sure Stage_num is gone
+  safe_model_expr <- model_expr %>%
+    dplyr::select(-any_of("Stage_num"))
+
   # TRAIN/TEST SPLIT
   idx <- caret::createDataPartition(
-    model_expr$Stage_binary_2, p = 0.8, list = FALSE
+    safe_model_expr$Stage_binary_2, p = 0.75, list = FALSE
   )
-  train_expr <- model_expr[idx, ]
-  test_expr  <- model_expr[-idx, ]
+  train_expr <- safe_model_expr[idx, ]
+  test_expr  <- safe_model_expr[-idx, ]
 
-  # WEIGHTED LOGISTIC REGRESSION (favor Late Stage)
-logit_model <- glm(
-  Stage_binary_2 ~ .,
-  data = train_data,
-  family = binomial(),
-  weights = ifelse(train_data$Stage_binary_2 == "Late Stages", 1, 1),
-  control = list(maxit = 200, epsilon = 1e-8)
-)
+  # WEIGHTED LOGISTIC REGRESSION
+  logit_model <- glm(
+    Stage_binary_2 ~ .,
+    data = train_expr,
+    family = binomial(link = "logit"),
+    weights = ifelse(train_expr$Stage_binary_2 == "Late Stages", 1, 3),
+    control = list(maxit = 200, epsilon = 1e-8)
+  )
 
-
-  # PREDICTIONS
-  test_prob <- predict(logit_expr, newdata = test_expr, type = "response")
-  test_pred <- ifelse(test_prob > 0.35, "Late Stages", "Early Stages")
+  # PREDICTION
+  test_prob <- predict(logit_model, newdata = test_expr, type = "response")
+  test_pred <- ifelse(test_prob > 0.5, "Late Stages", "Early Stages")
   test_pred <- factor(test_pred, levels = c("Early Stages", "Late Stages"))
 
   # CONFUSION MATRIX
   cm <- caret::confusionMatrix(test_pred, test_expr$Stage_binary_2)
 
+  # RETURN A CLEAN LIST OF METRICS
   return(list(
-    accuracy = cm$overall["Accuracy"],
+    accuracy    = cm$overall["Accuracy"],
     sensitivity = cm$byClass["Sensitivity"],
-    specificity = cm$byClass["Specificity"]
+    specificity = cm$byClass["Specificity"],
+    precision = cm$byClass["Precision"]
+
   ))
 }
 
-# ----- RUN MODEL 50 TIMES -----
+# ---- RUN 50 SEEDS ----
 seeds <- 1:50
 results_expr <- lapply(seeds, run_expr_model)
 
-# ----- MEAN METRICS -----
+# ---- MEAN METRICS ----
 expr_mean <- sapply(results_expr, function(x) unlist(x)) %>% rowMeans()
-
 expr_mean
 
 ```
+
 
