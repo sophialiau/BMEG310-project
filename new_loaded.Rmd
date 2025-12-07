@@ -964,6 +964,14 @@ clinical <- read_tsv(
 clinical <- clinical[-c(1, 2, 3, 4), ]
 mutations <- read.delim("data_mutations.txt", header = TRUE,
                       sep = "\t", stringsAsFactors = FALSE)
+
+expr_raw <- read.csv(
+  "RNAseq_LIHC.csv",
+  header = TRUE,
+  row.names = 1,          
+  check.names = FALSE     
+)
+
 clinical$Patient_ID <- clinical$PATIENT_ID
 mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
 
@@ -992,11 +1000,6 @@ for (i in seq_len(nrow(mut_filt))) {
     p <- mut_filt$Patient_ID[i]
     mut_matrix[g, p] <- 1
 }
-```
-
-### SECTION 30   ###
-
-```{r}
 parse_status <- function(x) {
     as.numeric(sub(":.*", "", x))
 }
@@ -1018,7 +1021,6 @@ clinical$Overall_Status <- parse_status(clinical$OS_STATUS)
 clinical$DSS_Status     <- parse_status(clinical$DSS_STATUS)
 clinical$DFS_Status     <- parse_status(clinical$DFS_STATUS)
 clinical$PFS_Status     <- parse_status(clinical$PFS_STATUS)
-
 # Create grouped clinical stage
 clinical$Stage_Grouped <- clinical$AJCC_PATHOLOGIC_TUMOR_STAGE  # start with original
 
@@ -1027,12 +1029,13 @@ clinical$Stage_Grouped <- ifelse(grepl("^STAGE I$", clinical$AJCC_PATHOLOGIC_TUM
                           ifelse(grepl("^STAGE III", clinical$AJCC_PATHOLOGIC_TUMOR_STAGE), "III/IV",
                           ifelse(grepl("^STAGE IV", clinical$AJCC_PATHOLOGIC_TUMOR_STAGE), "III/IV",
                                  NA))))
+                       
 ```
 
-
-### SECTION 31   ###
+### SECTION 30   ###
 
 Mutation-Based Cluster
+
 ```{r}
 gene_counts <- rowSums(mut_matrix)
 top_genes <- names(sort(gene_counts, decreasing = TRUE))[1:10]
@@ -1051,8 +1054,90 @@ clusters <- cutree(hc, k = 2)
 clinical_mutation$Mutation_Cluster <- clusters
 ```
 
+
+### SECTION 31   ###
+
+Gene code to name
+```{r}
+get_gene_symbols <- function(ens_ids) {
+  # Remove version numbers
+  ens_clean <- sub("\\..*", "", ens_ids)
+  
+  # Map Ensembl IDs → gene symbols
+  symbol_map <- mapIds(
+    org.Hs.eg.db,
+    keys = ens_clean,
+    keytype = "ENSEMBL",
+    column = "SYMBOL",
+    multiVals = "first"
+  )
+  
+  # Replace any NA with original ENSG ID if no symbol found
+  symbol_map[is.na(symbol_map)] <- ens_ids[is.na(symbol_map)]
+  
+  # Return just the values as a plain vector
+  unname(symbol_map)
+}
+```
+
 ### SECTION 32   ###
 
+Keep only patients in both clinical and expression data
+
+```{r}
+dim(expr_raw)
+expr_raw[1:5, 1:5]
+
+# Make expression matrix numeric
+expr_mat <- as.matrix(expr_raw)
+mode(expr_mat) <- "numeric"
+
+clinical <- as.data.frame(clinical)
+
+rownames(clinical) <- clinical$PATIENT_ID
+
+colnames(expr_mat) <- substr(colnames(expr_mat), 1, 12)
+
+common_ids <- intersect(colnames(expr_mat), rownames(clinical))
+length(common_ids)
+
+expr_filt    <- expr_mat[, common_ids]
+clinical_filt <- clinical[common_ids, ]
+
+# Check they are aligned
+stopifnot(all(colnames(expr_filt) == rownames(clinical_filt)))
+
+dim(expr_filt)
+dim(clinical_filt)
+
+
+# Building DESeqDataSet using filtered & matched data
+dds <- DESeqDataSetFromMatrix(
+  countData = expr_filt,      # <- use expr_filt
+  colData   = clinical_filt,  # <- use clinical_filt
+  design    = ~ 1             # no specific design yet
+)
+
+# Keeping only genes with 10 or more counts
+keep <- rowSums(counts(dds)) >= 10
+dds  <- dds[keep, ]
+
+# Normalized counts
+dds <- estimateSizeFactors(dds)
+norm_counts <- counts(dds, normalized = TRUE)
+
+# Variance stabilized transform (for downstream analysis such as clustering)
+vsd <- vst(dds, blind = TRUE)
+expr_vst <- assay(vsd)
+
+dim(expr_vst)
+expr_vst[1:5, 1:5]
+```
+
+
+### SECTION 33   ###
+
+PCA
 ```{r}
 expr_vst_t <- t(expr_vst)
 
@@ -1063,6 +1148,10 @@ var_explained <- pca_res$sdev^2 / sum(pca_res$sdev^2)
 var_explained_percent <- round(var_explained * 100, 2)
 
 sum(var_explained_percent[1:203])   
+```
+
+PCA plot and heatmap
+```{r}
 pca_df <- data.frame(
   PC1 = pca_res$x[,1],
   PC2 = pca_res$x[,2],
@@ -1074,6 +1163,11 @@ ggplot(pca_df, aes(PC1, PC2)) +
   labs(title = "PCA of LIHC RNA-seq",
        x = paste0("PC1 (", round(summary(pca_res)$importance[2,1] * 100, 1), "%)"),
        y = paste0("PC2 (", round(summary(pca_res)$importance[2,2] * 100, 1), "%)"))
+```
+
+Clustering
+
+```{r}
 var_genes <- rowVars(expr_vst)
 hvg_index <- order(var_genes, decreasing = TRUE)[1:500]
 hvg_mat <- expr_vst[hvg_index, ]
@@ -1097,7 +1191,35 @@ clinical_filt$Expression_Cluster
 table(Expression_Cluster)
 ```
 
-### SECTION 33   ###
+Visualization
+
+```{r}
+pheatmap(hvg_mat,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         clustering_method = "ward.D2",
+         annotation_col = data.frame(Cluster = Expression_Cluster),
+         main = "Heatmap of Top 1000 HVGs (LIHC)")
+
+# PCA on HVGs
+pca_hvg <- prcomp(t(hvg_mat))
+
+pca_df <- data.frame(
+  PC1 = pca_hvg$x[,1],
+  PC2 = pca_hvg$x[,2],
+  Cluster = Expression_Cluster
+)
+
+ggplot(pca_df, aes(PC1, PC2, color = Cluster)) +
+  geom_point(size = 2) +
+  labs(title = "PCA of LIHC RNA-seq (Top 1000 HVGs)",
+       x = paste0("PC1 (", round(summary(pca_hvg)$importance[2,1] * 100, 1), "%)"),
+       y = paste0("PC2 (", round(summary(pca_hvg)$importance[2,2] * 100, 1), "%)")) +
+  theme_minimal() +
+  scale_color_brewer(palette = "Dark2")
+```
+
+### SECTION 34   ###
 
 Attach expression cluster to clinical data
 ```{r}
@@ -1114,7 +1236,7 @@ stopifnot(all(clinical_filt$Patient_ID == expr_cluster_df$Patient_ID))
 clinical_filt$Expression_Cluster <- expr_cluster_df$Expression_Cluster
 ```
 
-### SECTION 34   ###
+### SECTION 35   ###
 
 Expression clusters vs clinical
 
@@ -1172,7 +1294,7 @@ ggplot(clinical_filt[!is.na(clinical_filt$Stage_Grouped), ],
     theme_minimal()
 ```
 
-### SECTION 35   ###
+### SECTION 36   ###
 
 Expression clusters vs clinical
 
@@ -1224,8 +1346,7 @@ for (ep in names(surv_endpoints)) {
   )
 }
 ```
-
-### SECTION 36   ###
+### SECTION 37   ###
 
 Expression Cluster vs Mutation Cluster
 
@@ -1241,6 +1362,7 @@ common_ids <- intersect(clinical_filt$Patient_ID,
 
 length(common_ids)   # number of overlapping patients
 ```
+
 
 ```{r}
 df_compare <- data.frame(
@@ -1282,7 +1404,8 @@ barplot(t(prop_expr_mut),
         main        = "Mutation-Cluster Composition Each Expression Cluster")
 ```
 
-### SECTION 37   ###
+
+### SECTION 38   ###
 
 Cluster Differential Expression
 
@@ -1327,7 +1450,6 @@ EnhancedVolcano(
 
 ```
 
-
 ```{r}
 res_1v3 <- results(dds_clusters, contrast = c("Expression_Cluster", "3", "1"))
 res_1v3 <- lfcShrink(dds_clusters, contrast = c("Expression_Cluster","3","1"), type = "ashr")
@@ -1347,6 +1469,7 @@ EnhancedVolcano(
 )
 
 ```
+
 
 ```{r}
 res_2v3 <- results(dds_clusters, contrast = c("Expression_Cluster", "3", "2"))
@@ -1469,9 +1592,7 @@ combined_plot <-
 combined_plot
 
 ```
-
-
-### SECTION 38   ###
+### SECTION 39   ###
 
 Survival Differential Expression
 
@@ -1570,8 +1691,7 @@ plot_volcano(results_list$PFS$cox, "Survival DE: PFS")
 
 ```
 
-### SECTION 39   ###
-
+### SECTION 40   ###
 Differential Expression Analysis on Sex and Age
 
 ```{r}
@@ -1621,8 +1741,5 @@ EnhancedVolcano(
   title = 'DE: Old vs Young (Age)'
 )
 ```
-
-
-
 
 
