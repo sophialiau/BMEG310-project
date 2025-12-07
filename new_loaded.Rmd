@@ -955,6 +955,15 @@ expr_mean
 ### SECTION 29   ###
 
 ```{r}
+clinical <- read_tsv(
+  "data_clinical_patient.txt",
+  comment = "#",
+  show_col_types = FALSE
+)
+
+clinical <- clinical[-c(1, 2, 3, 4), ]
+mutations <- read.delim("data_mutations.txt", header = TRUE,
+                      sep = "\t", stringsAsFactors = FALSE)
 clinical$Patient_ID <- clinical$PATIENT_ID
 mutations$Patient_ID <- substr(mutations$Tumor_Sample_Barcode, 1, 12)
 
